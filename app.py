@@ -1826,9 +1826,9 @@ def debug():
     try:
         with open(LOG_FILE, "r", encoding="utf-8") as f:
             lines = f.readlines()
-        return "<pre>" + "".join(lines[-100:]) + "</pre>", 200, {"Content-Type": "text/html"}
+        return "<pre>" + "".join(lines[-100:]) + "</pre>", 200, {"Content-Type": "text/html; charset=utf-8"}
     except Exception as e:
-        return f"<pre>Error: {e}</pre>", 200, {"Content-Type": "text/html"}
+        return f"<pre>Error: {e}</pre>", 200, {"Content-Type": "text/html; charset=utf-8"}
 
 
 @app.route("/stats")

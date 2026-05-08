@@ -1,33 +1,30 @@
 """
-Statham Moderation Bot v3.3 — PythonAnywhere FREE TIER
+Statham Moderation Bot v4.0 — Railway
 =======================================================
-Что нового в v3.3:
-  ✅ ИСПРАВЛЕНО: Groq AI теперь работает через прокси (был заблокирован)
-  ✅ ИСПРАВЛЕНО: Обновлена модель Groq (llama-3.3-70b-versatile)
-  ✅ Улучшено: Детальное логирование ошибок Groq
-  ✅ Улучшено: Контекст канала в системном промпте
-  🤖 Новые команды: /ai и /ask — прямой вопрос AI
-  🤖 Новый префикс: !ai — вызвать AI прямо в чате
-  💬 12% шанс случайного AI-ответа (было 5%)
-  🎮 Мини-игры: /roll, /coin, /fact, /quiz
-  📅 Автопосты: /morning (8:00), /night (23:00), /factofday (12:00)
-  📝 Персонализация: /remember, /myfacts — бот помнит факты о тебе
-  🎯 Реакции на ключевые слова: код, кофе, еда, работа, спорт...
+Что нового в v4.0 (Railway):
+  🚂 ПЕРЕНОС: PythonAnywhere → Railway (больше никаких ProxyError 503!)
+  ✅ УДАЛЕНО: Прокси для Telegram и Groq (на Railway не нужен)
+  ✅ ИСПРАВЛЕНО: BASE_DIR теперь через переменную DATA_DIR
+  ✅ ИСПРАВЛЕНО: PORT через переменную окружения Railway
+  ✅ ИСПРАВЛЕНО: RAILWAY_DOMAIN вместо PA_DOMAIN
+  ⏰ НОВОЕ: APScheduler — встроенный cron (не нужно настраивать Railway Cron Jobs)
+     - 08:00 МСК — утренний пост
+     - 12:00 МСК — факт дня
+     - 23:00 МСК — ночной пост
 
-Что было в v3.2:
-  ✅ ИСПРАВЛЕНО: Retry для webhook (устраняет ошибку 503 ProxyError)
-  ✅ ИСПРАВЛЕНО: Не переустанавливает webhook если уже стоит
-  ✅ НОВОЕ: /top — топ активных участников прямо в чате
-  ✅ НОВОЕ: /kick — выгнать участника (с возможностью вернуться)
-  ✅ НОВОЕ: Расширенный ИИ-ответчик (как дела, шутки, мотивация, время)
-  ✅ НОВОЕ: Ответы на "помогите", обращения по имени бота
-  ✅ НОВОЕ: Случайные реакции на слова "хорошо", "плохо", "скучно"
+Что было в v3.3 (PythonAnywhere):
+  ✅ Groq AI через прокси, модель llama-3.3-70b-versatile
+  🤖 Команды /ai, /ask, !ai
+  💬 12% шанс случайного AI-ответа
+  🎮 Мини-игры: /roll, /coin, /fact, /quiz
+  📝 Персонализация: /remember, /myfacts
 """
 from __future__ import annotations
-import json, os, re, time, threading, datetime, random, sqlite3, hashlib
+import json, os, re, time, threading, datetime, random, sqlite3, hashlib, signal, sys
 from flask import Flask, request
 import requests
 import telebot
+from apscheduler.schedulers.background import BackgroundScheduler
 
 app = Flask(__name__)
 
@@ -36,8 +33,8 @@ app = Flask(__name__)
 # ══════════════════════════════════════════════════════════════════════════════
 TOKEN     = os.environ.get("BOT_TOKEN", "")
 CHAT_ID   = os.environ.get("CHAT_ID",  "")
-PA_DOMAIN = os.environ.get("PA_DOMAIN", "")
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "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")  # 🔑 Получить: https://console.groq.com/keys
+PA_DOMAIN = os.environ.get("RAILWAY_DOMAIN", os.environ.get("PA_DOMAIN", ""))
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")  # 🔑 Получить: https://console.groq.com/keys
 
 if not TOKEN:
     raise RuntimeError("❌ BOT_TOKEN не задан! Укажите его в переменных окружения.")
@@ -57,7 +54,8 @@ RULES_TEXT = os.environ.get("RULES_TEXT", (
     "3 нарушения = мут. Не испытывай судьбу 😏"
 ))
 
-BASE_DIR   = "/home/artrush86/mysite"
+BASE_DIR   = os.environ.get("DATA_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"))
+os.makedirs(BASE_DIR, exist_ok=True)
 DB_PATH    = os.path.join(BASE_DIR, "bot.db")
 LOG_FILE   = os.path.join(BASE_DIR, "mod_log.txt")
 PHOTO_PATH = os.path.join(BASE_DIR, "helloboys.png")
@@ -79,7 +77,7 @@ _config = _load_config()
 # Переопределяем переменные окружения значениями из конфига если они есть
 TOKEN = os.environ.get("BOT_TOKEN") or _config.get("BOT_TOKEN", "")
 CHAT_ID = os.environ.get("CHAT_ID") or _config.get("CHAT_ID", "")
-PA_DOMAIN = os.environ.get("PA_DOMAIN") or _config.get("PA_DOMAIN", "")
+PA_DOMAIN = os.environ.get("RAILWAY_DOMAIN", os.environ.get("PA_DOMAIN")) or _config.get("PA_DOMAIN", "")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY") or _config.get("GROQ_API_KEY", "")
 
 # Прогрессивные муты: суммарные варны → длительность мута в минутах
@@ -92,9 +90,7 @@ FLOOD_MUTE  = 5    # мут в минутах
 
 bot = telebot.TeleBot(TOKEN, threaded=False)
 
-# 🔧 Прокси для PythonAnywhere free tier
-from telebot import apihelper
-apihelper.proxy = {"https": "http://proxy.server:3128"}
+# ✅ Railway: прокси не нужен — прямой доступ к Telegram API
 
 # ══════════════════════════════════════════════════════════════════════════════
 # RETRY ДЕКОРАТОР ДЛЯ НЕСТАБИЛЬНОГО ПРОКСИ
@@ -218,8 +214,8 @@ class GroqAI:
         messages.append({"role": "user", "content": f"{user_name}: {user_message}"})
 
         try:
-            # 🔧 Прокси для PythonAnywhere free tier
-            proxies = {"https": "http://proxy.server:3128"} if os.environ.get("PA_DOMAIN") else None
+            # ✅ Railway: прокси не нужен
+            proxies = None
             r = requests.post(
                 self.API_URL,
                 headers={
@@ -1874,14 +1870,46 @@ def health():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CRON / АВТОПОСТЫ ПО РАСПИСАНИЮ
+# ⏰ APSCHEDULER — встроенный cron (не нужны внешние Railway Cron Jobs)
 # ══════════════════════════════════════════════════════════════════════════════
-# Настройка на PythonAnywhere:
-# 1. Перейди во вкладку "Tasks"
-# 2. Создай два задания:
-#    - Время: 08:00, Команда: curl https://YOUR_DOMAIN/morning
-#    - Время: 23:00, Команда: curl https://YOUR_DOMAIN/night
-# ══════════════════════════════════════════════════════════════════════════════
+
+def _job_morning():
+    """Утренний пост — 08:00 МСК."""
+    write_log("SCHEDULER | morning job triggered")
+    text = random.choice(MORNING_MESSAGES)
+    if ai.api_key:
+        ai_greeting = ai.generate_greeting("чат", is_morning=True)
+        if ai_greeting:
+            text = ai_greeting
+    _send_scheduled_message(text, MORNING_PHOTO_PATH)
+
+def _job_night():
+    """Ночной пост — 23:00 МСК."""
+    write_log("SCHEDULER | night job triggered")
+    text = random.choice(NIGHT_MESSAGES)
+    _send_scheduled_message(text, NIGHT_PHOTO_PATH)
+
+def _job_factofday():
+    """Факт дня — 12:00 МСК."""
+    write_log("SCHEDULER | factofday job triggered")
+    text = random.choice(DAILY_FACTS)
+    _send_scheduled_message(text)
+
+# Инициализация планировщика
+_scheduler = BackgroundScheduler(timezone="Europe/Moscow", daemon=True)
+_scheduler.add_job(_job_morning,   "cron", hour=8,  minute=0,  id="morning")
+_scheduler.add_job(_job_factofday, "cron", hour=12, minute=0,  id="factofday")
+_scheduler.add_job(_job_night,     "cron", hour=23, minute=0,  id="night")
+_scheduler.start()
+write_log("SCHEDULER | APScheduler started (morning=08:00, fact=12:00, night=23:00 MSK)")
+
+# Graceful shutdown при SIGTERM (Railway останавливает контейнер через SIGTERM)
+def _handle_shutdown(sig, frame):
+    write_log("SHUTDOWN | SIGTERM received, stopping scheduler...")
+    _scheduler.shutdown(wait=False)
+    sys.exit(0)
+
+signal.signal(signal.SIGTERM, _handle_shutdown)
 
 MORNING_PHOTO_PATH = os.path.join(BASE_DIR, "morning.png")
 NIGHT_PHOTO_PATH = os.path.join(BASE_DIR, "night.png")
@@ -1934,7 +1962,7 @@ def _send_scheduled_message(text: str, photo_path: str = None):
 
 @app.route("/morning")
 def morning_post():
-    """08:00 утренний пост с картинкой."""
+    """Ручной триггер утреннего поста (APScheduler запускает автоматически в 08:00 МСК)."""
     text = random.choice(MORNING_MESSAGES)
     # Если есть AI — генерируем уникальное приветствие
     if ai.api_key:
@@ -1946,20 +1974,21 @@ def morning_post():
 
 @app.route("/night")
 def night_post():
-    """23:00 ночной пост с картинкой."""
+    """Ручной триггер ночного поста (APScheduler запускает автоматически в 23:00 МСК)."""
     text = random.choice(NIGHT_MESSAGES)
     return _send_scheduled_message(text, NIGHT_PHOTO_PATH)
 
 
 @app.route("/factofday")
 def fact_of_day():
-    """12:00 факт дня."""
+    """Ручной триггер факта дня (APScheduler запускает автоматически в 12:00 МСК)."""
     text = random.choice(DAILY_FACTS)
     return _send_scheduled_message(text)
 
 
-# WSGI entrypoint для PythonAnywhere
+# WSGI entrypoint (для совместимости с gunicorn)
 application = app
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5001, debug=False)
+    port = int(os.environ.get("PORT", 5001))
+    app.run(host="0.0.0.0", port=port, debug=False)

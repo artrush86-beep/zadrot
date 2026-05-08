@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+*.db
+*.log
+*.png
+*.jpg
+bot_config.json
+users.json
+warns.json
+fg_state.json
+.env
+data/
+.DS_Store

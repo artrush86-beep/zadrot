@@ -1179,15 +1179,19 @@ def cmd_help(m):
             "/clear_warns — сбросить предупреждения\n"
             "/warns — активные предупреждения\n"
             "/whois — досье на участника\n"
-            "/users_stats — статистика участников"
+            "/users_stats — статистика участников\n"
+            "/inactive [дни] — кто молчит N+ дней\n"
+            "/modlog — журнал модерации\n"
+            "/dailyreport — отчёт за сегодня"
         )
     _reply(m, (
-        "👮 <b>Команды Statham Bot v3.2</b>\n\n"
+        "👮 <b>Команды Statham Bot v4.0</b>\n\n"
         "<b>📋 Основные:</b>\n"
         "/start — приветствие\n"
         "/help — эта справка\n"
         "/rules — правила чата\n"
-        "/mystats — твоя статистика\n"
+        "/mystats — твоя статистика + XP\n"
+        "/rank — твой уровень и прогресс\n"
         "/top — топ-10 активных участников\n"
         "/report — пожаловаться на сообщение (ответом)\n\n"
         "<b>🎮 Мини-игры:</b>\n"
@@ -1218,12 +1222,23 @@ def cmd_mystats(m):
     if not user:
         _reply(m, "📊 Ещё нет данных о тебе. Напиши что-нибудь в чат!"); return
     unames = "@" + ", @".join(user["all_usernames"]) if user.get("all_usernames") else "—"
+    xp    = user.get("xp", 0)
+    level = user.get("level", 1)
+    lvl_name = get_level_name(level)
+    next_xp = LEVEL_NEXT_XP.get(level)
+    xp_line = f"{xp} XP" + (f" / {next_xp} XP до следующего" if next_xp else " — максимум!")
+    # Место в топе
+    top = get_top_users(100)
+    rank = next((i+1 for i, u in enumerate(top) if u["user_id"] == uid), "?")
     _reply(m, (
         f"📊 <b>Твоя статистика</b>\n\n"
         f"👤 Имя: <b>{user['first_name']}</b>\n"
         f"🆔 ID: <code>{uid}</code>\n"
         f"📎 Никнеймы: {unames}\n"
         f"💬 Сообщений: <b>{user['msg_count']}</b>\n"
+        f"🏆 Место в топе: #{rank}\n"
+        f"⭐ Уровень: {level} — {lvl_name}\n"
+        f"✨ XP: {xp_line}\n"
         f"📅 В чате с: {user['first_seen_dt']}\n"
         f"🕐 Последняя активность: {user['last_seen_dt']}\n"
         f"⚠️ Предупреждений: {cnt}/3"
@@ -1700,9 +1715,94 @@ def cmd_dialogstats(m):
 
     _reply(m, "\n".join(lines))
 
-# ══════════════════════════════════════════════════════════════════════════════
-# НОВЫЕ УЧАСТНИКИ / УХОД
-# ══════════════════════════════════════════════════════════════════════════════
+@bot.message_handler(commands=["rank"])
+def cmd_rank(m):
+    """⭐ Твой XP и уровень."""
+    uid  = m.from_user.id
+    user = get_user(uid)
+    if not user:
+        _reply(m, "📊 Ещё нет данных. Напиши что-нибудь в чат!"); return
+    xp    = user.get("xp", 0)
+    level = user.get("level", 1)
+    lvl_name = get_level_name(level)
+    next_xp = LEVEL_NEXT_XP.get(level)
+    top = get_top_users(100)
+    rank = next((i+1 for i, u in enumerate(top) if u["user_id"] == uid), "?")
+
+    # Прогресс-бар XP
+    if next_xp:
+        prev_xp = {1: 0, 2: 100, 3: 300, 4: 600}.get(level, 0)
+        progress = (xp - prev_xp) / (next_xp - prev_xp)
+        bar_len = 10
+        filled = int(progress * bar_len)
+        bar = "█" * filled + "░" * (bar_len - filled)
+        xp_line = f"{bar} {xp}/{next_xp} XP"
+    else:
+        xp_line = f"{'█' * 10} {xp} XP — МАКСИМУМ! 👑"
+
+    _reply(m, (
+        f"⭐ <b>Твой ранг, {user['first_name']}</b>\n\n"
+        f"🏆 Место в чате: <b>#{rank}</b>\n"
+        f"📊 Уровень: <b>{level}</b> — {lvl_name}\n"
+        f"✨ {xp_line}\n"
+        f"💬 Сообщений: {user['msg_count']}\n\n"
+        f"🌱 Новичок → 🌿 Участник (100) → 🌳 Активный (300) → ⭐ Ветеран (600) → 👑 Легенда (1000)"
+    ))
+
+@bot.message_handler(commands=["inactive"])
+def cmd_inactive(m):
+    """😴 Список участников, не писавших 7+ дней (только для админов)."""
+    if not is_admin(m.chat.id, m.from_user.id):
+        _reply(m, "❌ Только для администраторов."); return
+    args = m.text.split()
+    days = 7
+    if len(args) > 1:
+        try: days = max(1, int(args[1]))
+        except ValueError: pass
+    users = get_inactive_users(days)
+    if not users:
+        _reply(m, f"✅ Все активны — никто не молчал {days}+ дней."); return
+    lines = [f"😴 <b>Не писали {days}+ дней ({len(users)} чел.):</b>\n"]
+    for u in users[:15]:
+        uname = f"@{u['username']}" if u.get("username") else f"ID {u['user_id']}"
+        lines.append(f"• <b>{u['first_name']}</b> {uname} — {u['last_seen_dt']}")
+    _reply(m, "\n".join(lines))
+
+@bot.message_handler(commands=["modlog"])
+def cmd_modlog(m):
+    """📋 Журнал модерации (только для админов)."""
+    if not is_admin(m.chat.id, m.from_user.id):
+        _reply(m, "❌ Только для администраторов."); return
+    target_id = None
+    if m.reply_to_message:
+        target_id = m.reply_to_message.from_user.id
+    elif len(m.text.split()) > 1:
+        q = m.text.split()[1]
+        u = find_user_by_query(q)
+        if u: target_id = u["user_id"]
+    logs = get_mod_log(user_id=target_id, limit=15)
+    if not logs:
+        _reply(m, "📋 Журнал пуст."); return
+    action_icons = {"warn": "⚠️", "mute": "🔇", "ban": "🚫", "kick": "👢",
+                    "unmute": "🔊", "unban": "✅"}
+    lines = ["📋 <b>Журнал модерации</b>\n"]
+    for log in logs:
+        icon = action_icons.get(log["action"], "•")
+        name = log.get("first_name") or f"ID {log['user_id']}"
+        ts   = datetime.datetime.utcfromtimestamp(log["ts"]).strftime("%d.%m %H:%M")
+        dur  = f" ({format_duration(log['duration'])})" if log.get("duration") else ""
+        rsn  = f" — {log['reason']}" if log.get("reason") else ""
+        lines.append(f"{icon} {ts} <b>{name}</b>{dur}{rsn}")
+    _reply(m, "\n".join(lines))
+
+@bot.message_handler(commands=["dailyreport"])
+def cmd_dailyreport(m):
+    """📊 Ежедневный отчёт прямо сейчас (только для админов)."""
+    if not is_admin(m.chat.id, m.from_user.id):
+        _reply(m, "❌ Только для администраторов."); return
+    _reply(m, _build_daily_report())
+
+
 @bot.message_handler(content_types=["new_chat_members"])
 def welcome(message):
     for user in message.new_chat_members:
@@ -2004,35 +2104,139 @@ def debug():
 
 @app.route("/stats")
 def stats_page():
-    """Страница статистики для быстрого просмотра."""
+    """Умный дашборд статистики с графиками."""
     try:
         with _db_lock:
             conn = get_db()
             total_users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
             top_active  = conn.execute("""
-                SELECT first_name, username, msg_count
+                SELECT first_name, username, msg_count, xp, level
                 FROM users ORDER BY msg_count DESC LIMIT 10
             """).fetchall()
             active_warns = conn.execute("""
-                SELECT w.user_id, w.count, u.first_name
+                SELECT w.user_id, w.count, w.total_warns, u.first_name, u.username
                 FROM warns w LEFT JOIN users u ON w.user_id=u.user_id
                 WHERE w.count > 0
             """).fetchall()
             conn.close()
-        html = f"<h2>📊 Statham Bot Stats</h2><p>Всего участников: <b>{total_users}</b></p>"
-        html += "<h3>🏆 Топ активных</h3><ol>"
-        for u in top_active:
-            uname = f"@{u['username']}" if u["username"] else ""
-            html += f"<li>{u['first_name']} {uname} — {u['msg_count']} сообщений</li>"
-        html += "</ol><h3>⚠️ Активные варны</h3><ul>"
-        for w in active_warns:
-            html += f"<li>{w['first_name']} (ID {w['user_id']}): {w['count']}/3</li>"
-        if not active_warns:
-            html += "<li>Нет</li>"
-        html += "</ul>"
+
+        stats = get_daily_stats()
+        hourly = stats.get("hourly", [])
+        hours_labels = [f"{h}:00" for h in range(24)]
+        hours_data   = [0] * 24
+        for h in hourly:
+            hours_data[h["hour"]] = h["msg_count"]
+
+        # Топ-10 для бар-чарта
+        top_names  = [u["first_name"][:12] for u in top_active]
+        top_msgs   = [u["msg_count"] for u in top_active]
+        top_xp     = [u.get("xp", 0) for u in top_active]
+
+        level_icons = {1:"🌱",2:"🌿",3:"🌳",4:"⭐",5:"👑"}
+
+        rows_html = ""
+        for i, u in enumerate(top_active):
+            uname   = f"@{u['username']}" if u["username"] else "—"
+            lvl     = u.get("level", 1)
+            icon    = level_icons.get(lvl, "🌱")
+            pct     = min(100, int(u["msg_count"] / max(top_msgs[0], 1) * 100))
+            rows_html += f"""
+            <tr>
+              <td>{'🥇' if i==0 else '🥈' if i==1 else '🥉' if i==2 else f'{i+1}.'}</td>
+              <td><b>{u['first_name']}</b><br><small>{uname}</small></td>
+              <td>{u['msg_count']}</td>
+              <td>{icon} {u.get('xp',0)} XP</td>
+              <td><div class="bar"><div class="bar-fill" style="width:{pct}%"></div></div></td>
+            </tr>"""
+
+        warns_html = "".join(
+            f"<span class='warn-badge'>⚠️ {w['first_name'] or w['user_id']} — {w['count']}/3</span>"
+            for w in active_warns
+        ) or "<span style='color:#6ee7b7'>✅ Нет активных варнов</span>"
+
+        html = f"""<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>📊 Statham Bot Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  *{{box-sizing:border-box;margin:0;padding:0}}
+  body{{background:#0f172a;color:#e2e8f0;font-family:'Segoe UI',sans-serif;padding:20px}}
+  h1{{text-align:center;font-size:1.6em;margin-bottom:20px;color:#7dd3fc}}
+  .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:20px}}
+  .card{{background:#1e293b;border-radius:12px;padding:16px;text-align:center}}
+  .card .num{{font-size:2em;font-weight:700;color:#7dd3fc}}
+  .card .lbl{{font-size:.8em;color:#94a3b8;margin-top:4px}}
+  .section{{background:#1e293b;border-radius:12px;padding:16px;margin-bottom:16px}}
+  .section h2{{font-size:1em;color:#7dd3fc;margin-bottom:12px}}
+  table{{width:100%;border-collapse:collapse;font-size:.85em}}
+  td,th{{padding:8px 6px;border-bottom:1px solid #334155;text-align:left}}
+  th{{color:#94a3b8;font-weight:500}}
+  .bar{{background:#334155;border-radius:4px;height:8px;width:100px}}
+  .bar-fill{{background:#3b82f6;border-radius:4px;height:8px;transition:.3s}}
+  .warn-badge{{display:inline-block;background:#7f1d1d;color:#fca5a5;padding:4px 10px;
+               border-radius:8px;margin:4px;font-size:.85em}}
+  canvas{{max-height:200px}}
+  .ts{{text-align:center;color:#475569;font-size:.75em;margin-top:16px}}
+</style>
+</head>
+<body>
+<h1>📊 Statham Elite — Dashboard</h1>
+<div class="grid">
+  <div class="card"><div class="num">{total_users}</div><div class="lbl">Участников</div></div>
+  <div class="card"><div class="num">{stats['total_msgs']}</div><div class="lbl">Сообщений сегодня</div></div>
+  <div class="card"><div class="num">{stats['new_users']}</div><div class="lbl">Новых сегодня</div></div>
+  <div class="card"><div class="num">{len(active_warns)}</div><div class="lbl">Активных варнов</div></div>
+</div>
+
+<div class="section">
+  <h2>🕐 Активность по часам (МСК, сегодня)</h2>
+  <canvas id="hourChart"></canvas>
+</div>
+
+<div class="section">
+  <h2>🏆 Топ-10 участников</h2>
+  <table>
+    <tr><th>#</th><th>Имя</th><th>Сообщ.</th><th>XP</th><th>Прогресс</th></tr>
+    {rows_html}
+  </table>
+</div>
+
+<div class="section">
+  <h2>⚠️ Активные варны</h2>
+  {warns_html}
+</div>
+
+<div class="ts">Обновлено: {(datetime.datetime.utcnow()+datetime.timedelta(hours=3)).strftime('%d.%m.%Y %H:%M')} МСК</div>
+
+<script>
+new Chart(document.getElementById('hourChart'), {{
+  type: 'bar',
+  data: {{
+    labels: {json.dumps(hours_labels)},
+    datasets: [{{
+      label: 'Сообщений',
+      data: {json.dumps(hours_data)},
+      backgroundColor: 'rgba(59,130,246,0.7)',
+      borderRadius: 4,
+    }}]
+  }},
+  options: {{
+    responsive: true,
+    plugins: {{legend: {{display: false}}}},
+    scales: {{
+      x: {{ticks: {{color:'#94a3b8', maxRotation:0}}, grid: {{color:'#1e293b'}}}},
+      y: {{ticks: {{color:'#94a3b8'}}, grid: {{color:'#334155'}}}}
+    }}
+  }}
+}});
+</script>
+</body></html>"""
         return html, 200, {"Content-Type": "text/html; charset=utf-8"}
     except Exception as e:
-        return f"<pre>Error: {e}</pre>", 200
+        return f"<pre>Error: {e}</pre>", 200, {"Content-Type": "text/html; charset=utf-8"}
 
 
 @app.route("/health")
@@ -2066,13 +2270,77 @@ def _job_factofday():
     text = random.choice(DAILY_FACTS)
     _send_scheduled_message(text)
 
+def _build_daily_report() -> str:
+    """Собирает текст ежедневного отчёта."""
+    stats = get_daily_stats()
+    warns_today = get_mod_log(limit=100)
+    today = (datetime.datetime.utcnow() + datetime.timedelta(hours=3)).strftime("%Y-%m-%d")
+    warns_count = sum(1 for w in warns_today
+                      if w.get("action") == "warn" and
+                      datetime.datetime.utcfromtimestamp(w["ts"]).strftime("%Y-%m-%d") == today)
+    mutes_count = sum(1 for w in warns_today
+                      if w.get("action") == "mute" and
+                      datetime.datetime.utcfromtimestamp(w["ts"]).strftime("%Y-%m-%d") == today)
+    inactive = get_inactive_users(7)
+
+    top_user = stats.get("top_user")
+    top_line = ""
+    if top_user:
+        uname = f"@{top_user['username']}" if top_user.get("username") else top_user["first_name"]
+        top_line = f"\n🏆 Самый активный: {uname} ({top_user['msg_count']} сообщ.)"
+
+    # Пиковый час
+    hourly = stats.get("hourly", [])
+    peak_hour = max(hourly, key=lambda x: x["msg_count"])["hour"] if hourly else None
+    peak_line = f"\n🕐 Пик активности: {peak_hour}:00–{peak_hour+1}:00 МСК" if peak_hour is not None else ""
+
+    report = (
+        f"📊 <b>Ежедневный отчёт — {stats['date']}</b>\n\n"
+        f"💬 Сообщений за день: <b>{stats['total_msgs']}</b>\n"
+        f"👥 Новых участников: <b>{stats['new_users']}</b>\n"
+        f"⚠️ Варнов: <b>{warns_count}</b>  🔇 Мутов: <b>{mutes_count}</b>"
+        f"{top_line}{peak_line}\n"
+        f"😴 Молчат 7+ дней: <b>{len(inactive)}</b> чел."
+    )
+    return report
+
+def _job_daily_report():
+    """Ежедневный отчёт администратору — 23:50 МСК."""
+    write_log("SCHEDULER | daily_report job triggered")
+    report = _build_daily_report()
+    for admin_id in ADMIN_IDS:
+        try:
+            bot.send_message(admin_id, report, parse_mode="HTML")
+        except Exception as e:
+            write_log(f"DAILY_REPORT_ERR | admin={admin_id} | {e}")
+
+def _job_weekly_top():
+    """Еженедельный топ в чат — воскресенье 20:00 МСК."""
+    write_log("SCHEDULER | weekly_top job triggered")
+    if not CHAT_ID: return
+    top = get_top_users(5)
+    if not top: return
+    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
+    lines = ["🏆 <b>Топ недели — Statham Elite!</b>\n"]
+    for i, u in enumerate(top):
+        uname = f"@{u['username']}" if u.get("username") else u["first_name"]
+        lvl = get_level_name(u.get("level", 1))
+        lines.append(f"{medals[i]} {uname} — {u['msg_count']} сообщ. | {lvl}")
+    lines.append("\nПродолжайте в том же духе! 💪")
+    try:
+        _send_message_simple(int(CHAT_ID), "\n".join(lines), parse_mode="HTML")
+    except Exception as e:
+        write_log(f"WEEKLY_TOP_ERR | {e}")
+
 # Инициализация планировщика
 _scheduler = BackgroundScheduler(timezone="Europe/Moscow", daemon=True)
-_scheduler.add_job(_job_morning,   "cron", hour=8,  minute=0,  id="morning")
-_scheduler.add_job(_job_factofday, "cron", hour=12, minute=0,  id="factofday")
-_scheduler.add_job(_job_night,     "cron", hour=23, minute=0,  id="night")
+_scheduler.add_job(_job_morning,      "cron", hour=8,  minute=0,  id="morning")
+_scheduler.add_job(_job_factofday,    "cron", hour=12, minute=0,  id="factofday")
+_scheduler.add_job(_job_night,        "cron", hour=23, minute=0,  id="night")
+_scheduler.add_job(_job_daily_report, "cron", hour=23, minute=50, id="daily_report")
+_scheduler.add_job(_job_weekly_top,   "cron", day_of_week="sun", hour=20, minute=0, id="weekly_top")
 _scheduler.start()
-write_log("SCHEDULER | APScheduler started (morning=08:00, fact=12:00, night=23:00 MSK)")
+write_log("SCHEDULER | APScheduler started (morning=08:00, fact=12:00, night=23:00, report=23:50, weekly_top=Sun 20:00 MSK)")
 
 # Graceful shutdown при SIGTERM (Railway останавливает контейнер через SIGTERM)
 def _handle_shutdown(sig, frame):

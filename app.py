@@ -354,7 +354,37 @@ def init_db():
                 bot_reply  TEXT    NOT NULL,
                 ts         INTEGER DEFAULT 0
             );
+
+            CREATE TABLE IF NOT EXISTS daily_stats (
+                date       TEXT    NOT NULL,
+                user_id    INTEGER NOT NULL,
+                msg_count  INTEGER DEFAULT 0,
+                PRIMARY KEY (date, user_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS hourly_stats (
+                date       TEXT    NOT NULL,
+                hour       INTEGER NOT NULL,
+                msg_count  INTEGER DEFAULT 0,
+                PRIMARY KEY (date, hour)
+            );
+
+            CREATE TABLE IF NOT EXISTS mod_log (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                action     TEXT    NOT NULL,
+                user_id    INTEGER,
+                by_id      INTEGER,
+                reason     TEXT    DEFAULT '',
+                duration   INTEGER DEFAULT 0,
+                ts         INTEGER DEFAULT 0
+            );
         """)
+        # Добавляем колонки XP/level к существующей таблице (если их нет)
+        for col, default in [("xp", 0), ("level", 1), ("last_active_date", "''")]:
+            try:
+                conn.execute(f"ALTER TABLE users ADD COLUMN {col} {'INTEGER' if col != 'last_active_date' else 'TEXT'} DEFAULT {default}")
+            except Exception:
+                pass  # колонка уже есть
         conn.commit()
         conn.close()
 
@@ -364,7 +394,10 @@ def record_user(user) -> None:
         return
     uid   = user.id
     now   = int(time.time())
-    now_s = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    now_dt = datetime.datetime.utcnow() + datetime.timedelta(hours=3)  # МСК
+    now_s = now_dt.strftime("%Y-%m-%d %H:%M МСК")
+    today = now_dt.strftime("%Y-%m-%d")
+    hour  = now_dt.hour
     uname = (getattr(user, "username", "") or "").strip()
     fname = (getattr(user, "first_name", "") or "").strip()
 
@@ -375,18 +408,36 @@ def record_user(user) -> None:
             if row:
                 conn.execute("""
                     UPDATE users SET first_name=?, username=?, last_seen=?, last_seen_dt=?,
-                                     msg_count = msg_count + 1
+                                     msg_count = msg_count + 1,
+                                     xp = xp + 1,
+                                     last_active_date = ?
                     WHERE user_id=?
-                """, (fname, uname, now, now_s, uid))
+                """, (fname, uname, now, now_s, today, uid))
             else:
                 conn.execute("""
                     INSERT INTO users (user_id, first_name, username, msg_count,
-                                       first_seen, last_seen, first_seen_dt, last_seen_dt)
-                    VALUES (?,?,?,1,?,?,?,?)
-                """, (uid, fname, uname, now, now, now_s, now_s))
+                                       first_seen, last_seen, first_seen_dt, last_seen_dt,
+                                       xp, level, last_active_date)
+                    VALUES (?,?,?,1,?,?,?,?,1,1,?)
+                """, (uid, fname, uname, now, now, now_s, now_s, today))
             if uname:
                 conn.execute("INSERT OR IGNORE INTO usernames (user_id, username) VALUES (?,?)",
                              (uid, uname))
+            # Обновляем уровень на основе XP
+            xp_row = conn.execute("SELECT xp FROM users WHERE user_id=?", (uid,)).fetchone()
+            if xp_row:
+                new_level = _calc_level(xp_row[0])
+                conn.execute("UPDATE users SET level=? WHERE user_id=?", (new_level, uid))
+            # Дневная статистика
+            conn.execute("""
+                INSERT INTO daily_stats (date, user_id, msg_count) VALUES (?, ?, 1)
+                ON CONFLICT(date, user_id) DO UPDATE SET msg_count = msg_count + 1
+            """, (today, uid))
+            # Почасовая статистика
+            conn.execute("""
+                INSERT INTO hourly_stats (date, hour, msg_count) VALUES (?, ?, 1)
+                ON CONFLICT(date, hour) DO UPDATE SET msg_count = msg_count + 1
+            """, (today, hour))
             conn.commit()
         finally:
             conn.close()
@@ -436,14 +487,131 @@ def get_top_users(limit: int = 10) -> list[dict]:
         conn = get_db()
         try:
             rows = conn.execute("""
-                SELECT first_name, username, msg_count, user_id
+                SELECT first_name, username, msg_count, user_id, xp, level
                 FROM users ORDER BY msg_count DESC LIMIT ?
             """, (limit,)).fetchall()
             return [dict(r) for r in rows]
         finally:
             conn.close()
 
-# ── Предупреждения ────────────────────────────────────────────────────────────
+# ── XP и уровни ───────────────────────────────────────────────────────────────
+LEVEL_THRESHOLDS = [(1000, 5), (600, 4), (300, 3), (100, 2), (0, 1)]
+LEVEL_NAMES = {
+    1: "🌱 Новичок",
+    2: "🌿 Участник",
+    3: "🌳 Активный",
+    4: "⭐ Ветеран",
+    5: "👑 Легенда",
+}
+LEVEL_NEXT_XP = {1: 100, 2: 300, 3: 600, 4: 1000, 5: None}
+
+def _calc_level(xp: int) -> int:
+    for threshold, lvl in LEVEL_THRESHOLDS:
+        if xp >= threshold:
+            return lvl
+    return 1
+
+def get_level_name(level: int) -> str:
+    return LEVEL_NAMES.get(level, "🌱 Новичок")
+
+def add_xp(uid: int, amount: int):
+    """Добавляет или отнимает XP у пользователя."""
+    with _db_lock:
+        conn = get_db()
+        try:
+            conn.execute("UPDATE users SET xp = MAX(0, xp + ?) WHERE user_id=?", (amount, uid))
+            xp_row = conn.execute("SELECT xp FROM users WHERE user_id=?", (uid,)).fetchone()
+            if xp_row:
+                new_level = _calc_level(xp_row[0])
+                conn.execute("UPDATE users SET level=? WHERE user_id=?", (new_level, uid))
+            conn.commit()
+        finally:
+            conn.close()
+
+def get_daily_stats(date: str = None) -> dict:
+    """Статистика за день (по умолчанию — сегодня МСК)."""
+    if not date:
+        date = (datetime.datetime.utcnow() + datetime.timedelta(hours=3)).strftime("%Y-%m-%d")
+    with _db_lock:
+        conn = get_db()
+        try:
+            total_msgs = conn.execute(
+                "SELECT SUM(msg_count) FROM daily_stats WHERE date=?", (date,)
+            ).fetchone()[0] or 0
+            top_user = conn.execute("""
+                SELECT u.first_name, u.username, ds.msg_count
+                FROM daily_stats ds JOIN users u ON ds.user_id=u.user_id
+                WHERE ds.date=? ORDER BY ds.msg_count DESC LIMIT 1
+            """, (date,)).fetchone()
+            new_users = conn.execute("""
+                SELECT COUNT(*) FROM users
+                WHERE last_active_date=? AND msg_count=1
+            """, (date,)).fetchone()[0] or 0
+            hourly = conn.execute("""
+                SELECT hour, msg_count FROM hourly_stats WHERE date=? ORDER BY hour
+            """, (date,)).fetchall()
+            return {
+                "date": date,
+                "total_msgs": total_msgs,
+                "top_user": dict(top_user) if top_user else None,
+                "new_users": new_users,
+                "hourly": [dict(r) for r in hourly],
+            }
+        finally:
+            conn.close()
+
+def get_inactive_users(days: int = 7) -> list[dict]:
+    """Пользователи, не писавшие N+ дней."""
+    cutoff = int(time.time()) - days * 86400
+    with _db_lock:
+        conn = get_db()
+        try:
+            rows = conn.execute("""
+                SELECT first_name, username, user_id, last_seen, last_seen_dt
+                FROM users WHERE last_seen < ? AND msg_count > 0
+                ORDER BY last_seen DESC LIMIT 20
+            """, (cutoff,)).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+# ── Журнал модерации ──────────────────────────────────────────────────────────
+def log_mod_action(action: str, user_id: int, by_id: int = 0,
+                   reason: str = "", duration: int = 0):
+    """Записывает действие модератора в журнал."""
+    with _db_lock:
+        conn = get_db()
+        try:
+            conn.execute("""
+                INSERT INTO mod_log (action, user_id, by_id, reason, duration, ts)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (action, user_id, by_id, reason, duration, int(time.time())))
+            conn.commit()
+        finally:
+            conn.close()
+
+def get_mod_log(user_id: int = None, limit: int = 20) -> list[dict]:
+    """Последние записи журнала (по пользователю или все)."""
+    with _db_lock:
+        conn = get_db()
+        try:
+            if user_id:
+                rows = conn.execute("""
+                    SELECT ml.*, u.first_name, u.username
+                    FROM mod_log ml LEFT JOIN users u ON ml.user_id=u.user_id
+                    WHERE ml.user_id=? ORDER BY ml.ts DESC LIMIT ?
+                """, (user_id, limit)).fetchall()
+            else:
+                rows = conn.execute("""
+                    SELECT ml.*, u.first_name, u.username
+                    FROM mod_log ml LEFT JOIN users u ON ml.user_id=u.user_id
+                    ORDER BY ml.ts DESC LIMIT ?
+                """, (limit,)).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+
 def _auto_reset_warns(uid: int) -> int:
     """Сбрасывает варны если прошло >24 часов с последнего нарушения."""
     with _db_lock:
@@ -1290,9 +1458,11 @@ def cmd_warn(m):
         _reply(m, "❌ Нельзя выдать предупреждение администратору."); return
     _apply_warn(m.chat.id, target, reason="ручное предупреждение от админа")
 
-def _apply_warn(chat_id, user, reason: str = ""):
+def _apply_warn(chat_id, user, reason: str = "", by_id: int = 0):
     """Единая логика выдачи варна с прогрессивным мутом."""
     cnt, total = add_warn(user.id)
+    add_xp(user.id, -10)  # -10 XP за нарушение
+    log_mod_action("warn", user.id, by_id=by_id, reason=reason)
     write_log(f"WARN | {user.id} @{getattr(user,'username','')} | cnt={cnt} total={total} | {reason}")
 
     mute_mins = get_mute_duration(cnt)
@@ -1301,6 +1471,7 @@ def _apply_warn(chat_id, user, reason: str = ""):
     if should_mute:
         try:
             _mute(chat_id, user.id, mute_mins)
+            log_mod_action("mute", user.id, by_id=by_id, reason=f"авто-мут за {cnt} варна", duration=mute_mins)
             reset_warns(user.id)
             duration_str = format_duration(mute_mins)
             _send_message_simple(chat_id,

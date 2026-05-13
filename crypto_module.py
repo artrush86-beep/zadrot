@@ -7,7 +7,6 @@ from __future__ import annotations
 import os, re, time, requests
 from typing import Optional
 
-CRYPTOPANIC_KEY = os.environ.get("CRYPTOPANIC_KEY", "")
 COINGECKO_BASE  = "https://api.coingecko.com/api/v3"
 FEAR_GREED_URL  = "https://api.alternative.me/fng/"
 
@@ -29,15 +28,6 @@ COIN_ALIASES = {
     "sui":"sui","apt":"aptos","not":"notcoin",
 }
 
-IMPORTANT_KEYWORDS = [
-    "fed","federal reserve","фрс","interest rate","powell","пауэлл",
-    "inflation","инфляция","recession","рецессия",
-    "etf","sec","regulation","регулирование","запрет","ban",
-    "hack","хак","exploit","взлом","liquidation","ликвидация",
-    "halving","халвинг","all-time high","ath","crash","crashing",
-    "blackrock","fidelity","binance","coinbase","tether",
-    "cpi","gdp","nonfarm","jobs report",
-]
 
 # ══ ЦЕНЫ ═══════════════════════════════════════════════════════════════════════
 def get_prices(coins: list) -> dict:
@@ -135,31 +125,92 @@ def format_market_message() -> str:
     )
 
 # ══ FEAR & GREED ════════════════════════════════════════════════════════════════
-_FG_EMOJI = {"Extreme Fear":"😱","Fear":"😨","Neutral":"😐","Greed":"😏","Extreme Greed":"🤑"}
+_FG_EMOJI = {
+    "Extreme Fear": "😱", "Fear": "😨",
+    "Neutral": "😐",
+    "Greed": "😏", "Extreme Greed": "🤑",
+}
+_FG_RU = {
+    "Extreme Fear": "Экстремальный страх",
+    "Fear":         "Страх",
+    "Neutral":      "Нейтрально",
+    "Greed":        "Жадность",
+    "Extreme Greed":"Экстремальная жадность",
+}
+_FG_ZONES = [
+    (0,  24,  "Extreme Fear"),
+    (25, 44,  "Fear"),
+    (45, 55,  "Neutral"),
+    (56, 74,  "Greed"),
+    (75, 100, "Extreme Greed"),
+]
+
+def _fg_label_by_value(v: int) -> str:
+    """Определяем зону по числу — не зависим от строки API."""
+    for lo, hi, label in _FG_ZONES:
+        if lo <= v <= hi:
+            return label
+    return "Neutral"
 
 def get_fear_greed() -> dict:
-    try:
-        r = requests.get(FEAR_GREED_URL, params={"limit": 1}, timeout=10)
-        r.raise_for_status(); d = r.json()["data"][0]
-        return {"value": int(d["value"]), "label": d["value_classification"]}
-    except Exception: return {}
+    """Пробует несколько URL — если один упал, берёт следующий."""
+    urls = [
+        "https://api.alternative.me/fng/?limit=1",   # без params (надёжнее)
+        "https://api.alternative.me/fng/1",           # числовой путь
+        "https://api.alternative.me/fng/?limit=1&format=json",
+    ]
+    for url in urls:
+        try:
+            r = requests.get(url, timeout=10,
+                             headers={"User-Agent": "Mozilla/5.0"})
+            if r.status_code != 200:
+                continue
+            d = r.json()["data"][0]
+            val = int(d["value"])
+            # label берём из API, но если кривой — пересчитываем сами
+            raw_label = d.get("value_classification", "")
+            label = raw_label if raw_label in _FG_RU else _fg_label_by_value(val)
+            return {"value": val, "label": label}
+        except Exception:
+            continue
+    return {}
 
 def format_fear_greed() -> str:
     d = get_fear_greed()
-    if not d: return "❌ Не удалось получить F&G индекс."
-    val = d["value"]; label = d["label"]
+    if not d:
+        return "❌ Не удалось получить индекс страха и жадности."
+    val   = d["value"]
+    label = d["label"]
+    ru    = _FG_RU.get(label, label)
     emoji = _FG_EMOJI.get(label, "📊")
-    bar = "█" * (val // 10) + "░" * (10 - val // 10)
-    extra = ""
-    if val < 25: extra = "\n🩸 Рынок в страхе — исторически хорошая точка входа"
-    elif val > 75: extra = "\n🤑 Рынок жадный — будь осторожен!"
-    return f"{emoji} <b>Fear & Greed Index</b>\n\n<b>{val}/100</b> — {label}\n[{bar}]{extra}\n\n<i>via alternative.me</i>"
+    # Бар из 20 символов
+    filled = round(val / 100 * 20)
+    bar = "█" * filled + "░" * (20 - filled)
+    # Комментарий по зоне
+    if val <= 24:
+        comment = "\n🩸 <i>Рынок в панике — исторически хорошая точка входа</i>"
+    elif val <= 44:
+        comment = "\n📉 <i>Преобладает страх — возможны покупки на откатах</i>"
+    elif val <= 55:
+        comment = "\n😐 <i>Рынок спокоен — нет явного направления</i>"
+    elif val <= 74:
+        comment = "\n📈 <i>Рынок оптимистичен — следи за перегревом</i>"
+    else:
+        comment = "\n🤑 <i>Рынок жадный — осторожно, возможна коррекция</i>"
+    msk = time.strftime("%H:%M", time.gmtime(time.time() + 3*3600))
+    return (
+        f"{emoji} <b>Индекс Страха и Жадности</b> • {msk} МСК\n\n"
+        f"<b>{val} / 100</b> — {ru}\n"
+        f"<code>[{bar}]</code>"
+        f"{comment}\n\n"
+    )
 
 # ══ НОВОСТИ ════════════════════════════════════════════════════════════════════
 def get_crypto_news(limit=5, filter_="hot") -> list:
+    """Новости: CryptoPanic (если ключ есть) → иначе мультиисточниковый RSS."""
     if CRYPTOPANIC_KEY:
         try:
-            r = requests.get(f"https://cryptopanic.com/api/v1/posts/", params={
+            r = requests.get("https://cryptopanic.com/api/v1/posts/", params={
                 "auth_token": CRYPTOPANIC_KEY, "filter": filter_,
                 "currencies": "BTC,ETH,SOL,BNB,TON", "public": "true",
             }, timeout=12)
@@ -170,48 +221,75 @@ def get_crypto_news(limit=5, filter_="hot") -> list:
                     "id": str(item.get("id")), "title": item.get("title", ""),
                     "url": item.get("url", ""), "source": item.get("source", {}).get("title", ""),
                 })
-            if result: return result
-        except Exception: pass
+            if result:
+                return result
+        except Exception:
+            pass
+    # Без CryptoPanic — читаем русские + английские RSS
     return _news_rss(limit)
 
-def _news_rss(limit=5) -> list:
-    """Fallback: CoinDesk RSS — бесплатно, без ключа."""
+# RSS-источники: сначала русские, потом английские
+_RSS_SOURCES = [
+    # ── Русские (приоритет) ──────────────────────────────────────────────────
+    ("Forklog",       "https://forklog.com/feed/"),
+    ("BeInCrypto RU", "https://ru.beincrypto.com/feed/"),
+    ("Bits.Media",    "https://bits.media/rss/news/"),
+    # ── Английские (fallback) ────────────────────────────────────────────────
+    ("CoinDesk",      "https://feeds.feedburner.com/CoinDesk"),
+    ("CoinTelegraph", "https://cointelegraph.com/rss"),
+    ("Decrypt",       "https://decrypt.co/feed"),
+]
+
+def _parse_rss(url: str, source: str, limit: int) -> list:
+    """Парсит один RSS-фид, возвращает список новостей."""
     try:
-        r = requests.get("https://feeds.feedburner.com/CoinDesk", timeout=10,
+        r = requests.get(url, timeout=10,
                          headers={"User-Agent": "Mozilla/5.0"})
+        if r.status_code != 200:
+            return []
         items = re.findall(r"<item>(.*?)</item>", r.text, re.DOTALL)
         result = []
         for item in items[:limit]:
-            tm = re.search(r"<title><!\[CDATA\[(.*?)\]\]></title>", item)
+            # title: CDATA или обычный тег
+            tm = re.search(r"<title><!\[CDATA\[(.*?)\]\]></title>", item)               or re.search(r"<title>(.*?)</title>", item)
             lm = re.search(r"<link>(.*?)</link>", item)
             title = tm.group(1).strip() if tm else ""
             link  = lm.group(1).strip() if lm else ""
-            if title:
-                result.append({"id": link, "title": title, "url": link, "source": "CoinDesk"})
+            if title and len(title) > 5:
+                result.append({"id": link or title, "title": title,
+                               "url": link, "source": source})
         return result
-    except Exception: return []
+    except Exception:
+        return []
+
+def _news_rss(limit=5) -> list:
+    """Собирает новости из нескольких RSS — русские первыми."""
+    result = []
+    for source, url in _RSS_SOURCES:
+        if len(result) >= limit:
+            break
+        need = limit - len(result)
+        items = _parse_rss(url, source, need + 2)
+        result.extend(items[:need])
+    return result[:limit]
+
+# Русские источники — для метки языка
+_RU_SOURCES = {"Forklog", "BeInCrypto RU", "Bits.Media"}
 
 def format_news_message(news: list) -> str:
-    if not news: return "📰 Новости временно недоступны."
-    msk = time.strftime('%H:%M', time.gmtime(time.time() + 3*3600))
+    if not news:
+        return "📰 Новости временно недоступны."
+    msk = time.strftime("%H:%M", time.gmtime(time.time() + 3*3600))
     lines = [f"📰 <b>Крипто-новости</b> • {msk} МСК\n"]
     for i, n in enumerate(news, 1):
-        src = f" [{n.get('source','')}]" if n.get("source") else ""
-        lines.append(f"{i}. {n['title']}{src}")
-        if n.get("url"): lines.append(f"   🔗 {n['url']}")
+        source = n.get("source", "")
+        lang   = "" if source in _RU_SOURCES else " 🇬🇧" if source else ""
+        src_str = f" <i>[{source}{lang}]</i>" if source else ""
+        lines.append(f"{i}. {n['title']}{src_str}")
+        if n.get("url"):
+            lines.append(f"   🔗 {n['url']}")
     return "\n".join(lines)
 
-def check_important_news(sent_checker=None) -> list:
-    """Возвращает важные ещё не отправленные новости."""
-    news = get_crypto_news(limit=20, filter_="important")
-    result = []
-    for n in news:
-        tl = n["title"].lower()
-        important = any(kw in tl for kw in IMPORTANT_KEYWORDS)
-        sent = sent_checker(n["id"]) if sent_checker else False
-        if important and not sent:
-            result.append(n)
-    return result[:3]
 
 def format_breaking_news(news: list) -> str:
     if not news: return ""

@@ -40,8 +40,22 @@ from redis_memory import (
 )
 from crypto_module import (
     format_price_message, format_market_message, format_fear_greed,
-    get_crypto_news, format_news_message, check_important_news,
-    format_breaking_news, get_crypto_ai_context, check_price_alerts, COIN_ALIASES,
+    get_crypto_ai_context, check_price_alerts, COIN_ALIASES, get_prices,
+)
+from chart_module import (
+    format_chart_message, format_movers_message,
+    format_altseason_message, format_funding_message, format_tvl_message,
+)
+from portfolio_module import handle_portfolio_command, give_achievement as port_ach
+from calendar_module import (
+    format_calendar_message, check_events_today, check_events_soon, format_event_alert,
+)
+from game_module import (
+    CRYPTO_LEVEL_NAMES, give_achievement, get_achievements, format_achievements,
+    make_prediction, get_active_predictions, resolve_predictions,
+    save_predict_stats, get_predict_stats, format_predict_stats,
+    get_prediction_leaderboard, get_daily_question, vote,
+    get_vote_results, format_vote_results,
 )
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -203,7 +217,7 @@ class GroqAI:
         is_close_chat = chat_depth >= 3  # Если 3+ обмена — это плотное общение
 
         system_prompt = (
-            "Ты — дружелюбный бот Statham в Telegram-чате Statham Elite. "
+            "Ты — Statham, бот в крипто-чате Telegram. Характер прямой, с юмором. Торгуешь крипто с 2017. "
             "Это чат для общения на разные темы: программирование, жизнь, юмор. "
             "Отвечай кратко (1-2 предложения), с юмором, на русском. "
             "Ты модератор, но дружелюбный. Используй эмодзи. "
@@ -574,12 +588,13 @@ def get_top_users(limit: int = 10) -> list[dict]:
 
 # ── XP и уровни ───────────────────────────────────────────────────────────────
 LEVEL_THRESHOLDS = [(1000, 5), (600, 4), (300, 3), (100, 2), (0, 1)]
+# Крипто-ранги v6.0
 LEVEL_NAMES = {
-    1: "🌱 Новичок",
-    2: "🌿 Участник",
-    3: "🌳 Активный",
-    4: "⭐ Ветеран",
-    5: "👑 Легенда",
+    1: "🌱 Hodler",
+    2: "📊 Trader",
+    3: "🐳 Whale",
+    4: "🔱 Satoshi",
+    5: "👑 Nakamoto",
 }
 LEVEL_NEXT_XP = {1: 100, 2: 300, 3: 600, 4: 1000, 5: None}
 
@@ -1272,7 +1287,6 @@ def cmd_start(m):
         "🤖 /ai [вопрос] — AI (Groq + Gemini)\n"
         "📈 /price btc eth — цены крипты\n"
         "😱 /fear — Fear & Greed Index\n"
-        "📰 /news — крипто-новости\n"
         "🔔 /alert btc 100000 — ценовой алерт"
     ))
 
@@ -1306,13 +1320,26 @@ def cmd_help(m):
         "/rank — твой уровень и прогресс\n"
         "/top — топ-10 активных участников\n"
         "/report — пожаловаться (ответом на сообщение)\n\n"
-        "<b>📊 Крипта:</b>\n"
+        "<b>📊 Крипта — цены:</b>\n"
         "/price btc eth sol — цены монет\n"
+        "/chart btc 7d — ASCII-график (1d/7d/30d)\n"
+        "/movers — топ гейнеры/лузеры за 24ч\n"
+        "/alts — альтсезон или биткоин-сезон?\n"
+        "/funding btc — funding rate фьючерсов\n"
+        "/tvl — DeFi TVL по сетям\n\n"
+        "<b>📊 Крипта — инструменты:</b>\n"
         "/fear — Fear & Greed Index\n"
         "/market — сводка рынка (капа, доминация)\n"
-        "/news — топ крипто-новостей\n"
+        "/portfolio — мой крипто-портфель\n"
         "/alert btc 100000 — алерт когда BTC > $100k\n"
-        "/alerts — мои алерты\n\n"
+        "/alerts — мои алерты\n"
+        "/calendar — экономический календарь (ФРС, CPI, NFP)\n\n"
+        "<b>🎲 Ставки и игры:</b>\n"
+        "/predict btc up — ставка на рост/падение (4ч)\n"
+        "/predstats — моя статистика ставок\n"
+        "/predtop — топ предсказателей\n"
+        "/dailyvote — ежедневное голосование\n"
+        "/achievements — мои достижения\n\n"
         "<b>🎮 Мини-игры:</b>\n"
         "/roll — кинуть кубик (1-100)\n"
         "/coin — подбросить монетку\n"
@@ -2179,6 +2206,11 @@ def cmd_price(m):
     coins = [c.lower() for c in parts[:5]]
     msg = format_price_message(coins)
     _reply(m, msg)
+    # Ачивка
+    if give_achievement(m.from_user.id, "first_price"):
+        try: bot.send_message(m.from_user.id, "🏅 Достижение: 📊 Первый запрос цены (+5 XP)", parse_mode="HTML")
+        except Exception: pass
+    add_xp(m.from_user.id, 2)
 
 
 @bot.message_handler(commands=["fear", "fng", "страх"])
@@ -2191,6 +2223,9 @@ def cmd_fear(m):
     except Exception:
         pass
     _reply(m, format_fear_greed())
+    if give_achievement(m.from_user.id, "first_fear"):
+        try: bot.send_message(m.from_user.id, "🏅 Достижение: 😱 Первый F&G запрос (+5 XP)", parse_mode="HTML")
+        except Exception: pass
 
 
 @bot.message_handler(commands=["market", "cap", "рынок"])
@@ -2203,25 +2238,6 @@ def cmd_market(m):
     except Exception:
         pass
     _reply(m, format_market_message())
-
-
-@bot.message_handler(commands=["news", "новости", "cn"])
-def cmd_news(m):
-    """📰 Крипто-новости"""
-    if not check_rate_limit(m.from_user.id, "news", max_calls=5, window=60):
-        _reply(m, "⏳ Слишком частые запросы."); return
-    try:
-        bot.send_chat_action(m.chat.id, "typing")
-    except Exception:
-        pass
-    # Пробуем кэш Redis
-    cached = get_crypto_news_cache()
-    if cached:
-        _reply(m, format_news_message(cached) + "\n<i>(кэш)</i>"); return
-    news = get_crypto_news(limit=5)
-    if news:
-        set_crypto_news(news, ttl=1800)
-    _reply(m, format_news_message(news))
 
 
 @bot.message_handler(commands=["alert", "алерт"])
@@ -2265,6 +2281,7 @@ def cmd_alert(m):
                   f"Уведомлю когда <b>{symbol}</b> будет {dir_str} "
                   f"<b>${target:,.0f}</b>\n\n"
                   f"<i>Проверяется каждые 5 минут</i>")
+        give_achievement(m.from_user.id, "first_alert")
     else:
         _reply(m, "❌ Не удалось установить алерт. Redis должен быть подключён.")
 
@@ -2333,6 +2350,258 @@ def cmd_redis_stat(m):
         f"Gemini: {gemini_status}",
     ]
     _reply(m, "\n".join(lines))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 📊 НОВЫЕ КРИПТО-КОМАНДЫ v6.0 (Уровень 2)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@bot.message_handler(commands=["chart", "график"])
+def cmd_chart(m):
+    """📈 ASCII-график цены. /chart btc 7d"""
+    parts = m.text.split()[1:]
+    if not parts:
+        _reply(m, "📈 Использование: /chart [монета] [период]\n\nПримеры:\n• /chart btc 7d\n• /chart eth 30d\n• /chart sol 1d\n\nПериоды: 1d, 7d, 30d, 90d"); return
+    coin   = parts[0].lower()
+    period = parts[1].lower() if len(parts) > 1 else "7d"
+    try: bot.send_chat_action(m.chat.id, "typing")
+    except Exception: pass
+    _reply(m, format_chart_message(coin, period))
+
+
+@bot.message_handler(commands=["movers", "топ", "движение"])
+def cmd_movers(m):
+    """🚀 Топ гейнеры и лузеры за 24ч из топ-100."""
+    if not check_rate_limit(m.from_user.id, "movers", max_calls=5, window=60):
+        _reply(m, "⏳ Подожди немного."); return
+    try: bot.send_chat_action(m.chat.id, "typing")
+    except Exception: pass
+    _reply(m, format_movers_message())
+
+
+@bot.message_handler(commands=["alts", "альтсезон", "altseason"])
+def cmd_alts(m):
+    """🌈 Альтсезон или биткоин-сезон?"""
+    try: bot.send_chat_action(m.chat.id, "typing")
+    except Exception: pass
+    _reply(m, format_altseason_message())
+
+
+@bot.message_handler(commands=["funding", "фандинг"])
+def cmd_funding(m):
+    """💸 Funding rate фьючерсов. /funding btc"""
+    parts = m.text.split()[1:]
+    coin = parts[0].lower() if parts else "btc"
+    try: bot.send_chat_action(m.chat.id, "typing")
+    except Exception: pass
+    _reply(m, format_funding_message(coin))
+
+
+@bot.message_handler(commands=["tvl", "defi"])
+def cmd_tvl(m):
+    """🏦 DeFi TVL по сетям (DeFiLlama)."""
+    try: bot.send_chat_action(m.chat.id, "typing")
+    except Exception: pass
+    _reply(m, format_tvl_message())
+
+
+@bot.message_handler(commands=["portfolio", "port", "портфель"])
+def cmd_portfolio(m):
+    """💼 Крипто-портфель пользователя."""
+    parts = m.text.split()[1:]
+    result = handle_portfolio_command(m.from_user.id, parts)
+    _reply(m, result)
+    # Ачивка при первом добавлении
+    if parts and parts[0].lower() in ("add", "set", "добавить", "установить"):
+        if give_achievement(m.from_user.id, "first_portfolio"):
+            try: bot.send_message(m.from_user.id,
+                "🏅 Достижение: 💼 Создал портфель (+15 XP)", parse_mode="HTML")
+            except Exception: pass
+            add_xp(m.from_user.id, 15)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 📅 ЭКОНОМИЧЕСКИЙ КАЛЕНДАРЬ (Уровень 5)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@bot.message_handler(commands=["calendar", "cal", "календарь", "события"])
+def cmd_calendar(m):
+    """📅 Экономический календарь: ФРС, CPI, NFP."""
+    try: bot.send_chat_action(m.chat.id, "typing")
+    except Exception: pass
+    _reply(m, format_calendar_message(days_ahead=7))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 🎲 ГЕЙМИФИКАЦИЯ (Уровень 4)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@bot.message_handler(commands=["predict", "ставка", "прогноз"])
+def cmd_predict(m):
+    """🔮 Ставка на направление. /predict btc up"""
+    parts = m.text.split()[1:]
+    if len(parts) < 2:
+        _reply(m, (
+            "🔮 <b>Ставки на направление</b>\n\n"
+            "Использование:\n"
+            "• <code>/predict btc up</code> — BTC вырастет за 4 часа\n"
+            "• <code>/predict eth down</code> — ETH упадёт за 4 часа\n\n"
+            "Результат проверяется автоматически через 4 часа.\n"
+            "За правильный ответ: +25 XP 🎯"
+        )); return
+
+    from crypto_module import COIN_ALIASES, get_prices
+    coin_input = parts[0].lower()
+    direction_raw = parts[1].lower()
+
+    if direction_raw in ("up", "вверх", "рост", "pump", "🚀", "лонг", "long"):
+        direction = "up"
+        dir_str = "🟢 вырастет"
+    elif direction_raw in ("down", "вниз", "падение", "dump", "📉", "шорт", "short"):
+        direction = "down"
+        dir_str = "🔴 упадёт"
+    else:
+        _reply(m, "❌ Направление: up (рост) или down (падение)"); return
+
+    coin_id = COIN_ALIASES.get(coin_input, coin_input)
+    prices = get_prices([coin_input])
+    if "_error" in prices or not prices:
+        _reply(m, "❌ Монета не найдена."); return
+
+    d = list(prices.values())[0]
+    current = d["price"]
+    sym = d["symbol"]
+
+    uid = m.from_user.id
+    name = m.from_user.first_name or "Аноним"
+    ok = make_prediction(uid, name, coin_id, direction, current)
+    if not ok:
+        _reply(m, f"⚠️ У тебя уже есть активная ставка на <b>{sym}</b>. Дождись результата.")
+        return
+
+    give_achievement(uid, "first_predict")
+    add_xp(uid, 5)
+    from crypto_module import _fmt_price
+    _reply(m, (
+        f"🔮 <b>Ставка принята!</b>\n\n"
+        f"<b>{sym}</b> {dir_str} за 4 часа\n"
+        f"Текущая цена: {_fmt_price(current)}\n\n"
+        f"⏰ Результат через 4 часа\n"
+        f"🎯 Угадаешь — получишь +25 XP"
+    ))
+
+
+@bot.message_handler(commands=["predstats", "стата", "предсказания"])
+def cmd_predstats(m):
+    """📊 Статистика предсказаний."""
+    name = m.from_user.first_name or "Аноним"
+    _reply(m, format_predict_stats(m.from_user.id, name))
+
+
+@bot.message_handler(commands=["predtop", "топставки"])
+def cmd_predtop(m):
+    """🏆 Топ предсказателей."""
+    board = get_prediction_leaderboard(10)
+    if not board:
+        _reply(m, "🏆 Пока нет данных. Первым сделай ставку: /predict btc up"); return
+    lines = ["🏆 <b>Топ предсказателей</b>\n"]
+    medals = ["🥇", "🥈", "🥉"] + ["  "] * 10
+    for i, row in enumerate(board):
+        lines.append(
+            f"{medals[i]} #{i+1} — "
+            f"Точность: <b>{row['winrate']}%</b> "
+            f"({row['wins']}/{row['total']})"
+        )
+    _reply(m, "\n".join(lines))
+
+
+@bot.message_handler(commands=["dailyvote", "голос", "vote"])
+def cmd_dailyvote(m):
+    """📊 Ежедневное голосование с кнопками."""
+    import datetime
+    question = get_daily_question()
+    qid = datetime.date.today().isoformat()
+    options_text = "\n".join([f"{i+1}. {o}" for i, o in enumerate(question["options"])])
+    results = get_vote_results(qid, question["options"])
+    total = results.get("total", 0) if results else 0
+
+    # Создаём клавиатуру
+    markup = telebot.types.InlineKeyboardMarkup(row_width=2)
+    btns = [telebot.types.InlineKeyboardButton(
+        text=f"{i+1}. {opt}",
+        callback_data=f"vote:{qid}:{i}"
+    ) for i, opt in enumerate(question["options"])]
+    markup.add(*btns)
+
+    text = (
+        f"📊 <b>Вопрос дня</b>\n\n"
+        f"{question['text']}\n\n"
+        f"👥 Уже проголосовало: <b>{total}</b>"
+    )
+    try:
+        bot.send_message(m.chat.id, text, parse_mode="HTML",
+                        reply_markup=markup)
+    except Exception as e:
+        _reply(m, text + "\n\n" + options_text)
+
+
+@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("vote:"))
+def handle_vote_callback(call):
+    """Обработка голосования через inline кнопки."""
+    import datetime
+    parts = call.data.split(":")
+    if len(parts) != 3:
+        return
+    qid = parts[1]; option_idx = int(parts[2])
+    question = get_daily_question()
+    current_qid = datetime.date.today().isoformat()
+    if qid != current_qid:
+        bot.answer_callback_query(call.id, "⏰ Это голосование уже устарело.")
+        return
+    ok, msg = vote(call.from_user.id, qid, option_idx)
+    if not ok:
+        bot.answer_callback_query(call.id, msg)
+        return
+    add_xp(call.from_user.id, 3)
+    bot.answer_callback_query(call.id, "✅ Голос принят! +3 XP")
+    # Обновляем сообщение с результатами
+    try:
+        results_text = format_vote_results(qid, question["text"], question["options"])
+        markup = telebot.types.InlineKeyboardMarkup(row_width=2)
+        btns = [telebot.types.InlineKeyboardButton(
+            text=f"{i+1}. {opt}",
+            callback_data=f"vote:{qid}:{i}"
+        ) for i, opt in enumerate(question["options"])]
+        markup.add(*btns)
+        bot.edit_message_text(results_text, call.message.chat.id,
+                             call.message.message_id,
+                             parse_mode="HTML", reply_markup=markup)
+    except Exception:
+        pass
+
+
+@bot.message_handler(commands=["achievements", "ачивки", "бейджи"])
+def cmd_achievements(m):
+    """🏅 Мои достижения."""
+    _reply(m, format_achievements(m.from_user.id))
+
+
+@bot.message_handler(commands=["summary", "итог"])
+def cmd_summary(m):
+    """📝 AI-суммаризация последних сообщений чата."""
+    if not (ai.api_key or gemini.enabled):
+        _reply(m, "❌ AI не настроен."); return
+    ctx = get_global_ctx(limit=30)
+    if not ctx:
+        _reply(m, "📝 Нет достаточно сообщений для суммаризации."); return
+    try: bot.send_chat_action(m.chat.id, "typing")
+    except Exception: pass
+    prompt = f"Суммаризируй кратко (3-5 предложений) о чём говорили в чате:\n\n{ctx}"
+    resp = ask_ai(prompt, "Summary", context="Задача: краткое резюме чата на русском.")
+    if resp:
+        _reply(m, f"📝 <b>О чём говорили в чате:</b>\n\n{resp}")
+    else:
+        _reply(m, "❌ AI не смог обработать запрос.")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # WEBHOOK + FLASK ROUTES
@@ -2664,17 +2933,6 @@ def _job_weekly_top():
 # Инициализация планировщика
 # ══ Новые крипто-задачи (v5.0) ════════════════════════════════════════════════
 
-def _job_crypto_news():
-    """Проверка важных новостей каждый час (ФРС, SEC, взломы, хайп)."""
-    write_log("SCHEDULER | crypto_news check")
-    try:
-        important = check_important_news(sent_checker=is_news_sent)
-        if important:
-            text = format_breaking_news(important)
-            for n in important:
-                mark_news_sent(n["id"])
-            _send_scheduled_message(text)
-            write_log(f"SCHEDULER | sent {len(important)} important news")
     except Exception as e:
         write_log(f"CRYPTO_NEWS_ERR | {e}")
 
@@ -2711,11 +2969,102 @@ def _job_check_alerts():
             except Exception:
                 pass
             remove_alert(uid_alert, a["coin"])
+            give_achievement(uid_alert, "alert_fired")
+            add_xp(uid_alert, 10)
         if triggered:
             write_log(f"ALERTS | triggered {len(triggered)} alerts")
     except Exception as e:
         write_log(f"ALERT_CHECK_ERR | {e}")
 
+
+
+
+def _job_resolve_predictions():
+    """Определяет результаты ставок каждые 4 часа."""
+    write_log("SCHEDULER | resolve_predictions")
+    try:
+        from crypto_module import get_prices, COIN_ALIASES, _fmt_price
+        preds = get_active_predictions()
+        if not preds: return
+        # Собираем уникальные монеты
+        coins = list({p["coin"].lower() for p in preds})
+        prices = get_prices(coins)
+        for coin in coins:
+            coin_id = COIN_ALIASES.get(coin, coin)
+            d = prices.get(coin_id)
+            if not d or "_error" in str(d): continue
+            results = resolve_predictions(coin, d["price"])
+            for res in results:
+                uid_r = res["uid"]
+                won = res["won"]
+                save_predict_stats(uid_r, won)
+                xp_gain = 25 if won else 2
+                add_xp(uid_r, xp_gain)
+                sym = coin.upper()
+                status = "🎯 Угадал!" if won else "❌ Не угадал"
+                dir_str = "🟢 вырос" if res["actual"] == "up" else ("🔴 упал" if res["actual"] == "down" else "😐 не изменился")
+                text = (
+                    f"🔮 <b>Результат ставки</b>\n\n"
+                    f"<b>{sym}</b> {dir_str}\n"
+                    f"Было: {_fmt_price(res['price_at'])} → Стало: {_fmt_price(res['new_price'])}\n\n"
+                    f"{status} {'+' + str(xp_gain) if won else '+' + str(xp_gain)} XP"
+                )
+                try: bot.send_message(uid_r, text, parse_mode="HTML")
+                except Exception: pass
+                # Ачивки
+                if won:
+                    give_achievement(uid_r, "predict_win")
+                    stats = get_predict_stats(uid_r)
+                    if stats.get("streak", 0) >= 5:
+                        if give_achievement(uid_r, "predict_5"):
+                            try: bot.send_message(uid_r, "🌟 ДОСТИЖЕНИЕ: 5 угаданных подряд! +100 XP", parse_mode="HTML")
+                            except Exception: pass
+                            add_xp(uid_r, 100)
+                total = get_predict_stats(uid_r).get("total", 0)
+                if total >= 10: give_achievement(uid_r, "degen")
+        write_log(f"SCHEDULER | resolved {len(preds)} predictions")
+    except Exception as e:
+        write_log(f"RESOLVE_PRED_ERR | {e}")
+
+
+def _job_calendar_check():
+    """Проверка важных экономических событий (2 раза в день: 8:00 и 20:00 МСК)."""
+    write_log("SCHEDULER | calendar_check")
+    try:
+        # Утром — события на сегодня
+        events_today = check_events_today()
+        if events_today:
+            lines = ["📅 <b>Сегодня важные экономические события:</b>\n"]
+            for e in events_today:
+                from calendar_module import _translate_event
+                lines.append(f"• {_translate_event(e['title'])} — {e.get('time','?')}")
+            lines.append("\n⚡ Это может повлиять на рынок. Следите за /price и /fear")
+            _send_scheduled_message("\n".join(lines))
+        # Проверяем события через ~2 часа
+        events_soon = check_events_soon(hours=2)
+        for e in events_soon:
+            _send_scheduled_message(format_event_alert(e))
+    except Exception as e:
+        write_log(f"CALENDAR_ERR | {e}")
+
+
+def _job_daily_vote():
+    """Ежедневное голосование в чате в 10:00 МСК."""
+    write_log("SCHEDULER | daily_vote")
+    try:
+        import datetime
+        question = get_daily_question()
+        qid = datetime.date.today().isoformat()
+        markup = telebot.types.InlineKeyboardMarkup(row_width=2)
+        btns = [telebot.types.InlineKeyboardButton(
+            text=f"{i+1}. {opt}",
+            callback_data=f"vote:{qid}:{i}"
+        ) for i, opt in enumerate(question["options"])]
+        markup.add(*btns)
+        text = f"📊 <b>Вопрос дня</b>\n\n{question['text']}"
+        bot.send_message(CHAT_ID, text, parse_mode="HTML", reply_markup=markup)
+    except Exception as e:
+        write_log(f"DAILY_VOTE_ERR | {e}")
 
 _scheduler = BackgroundScheduler(timezone="Europe/Moscow", daemon=True)
 _scheduler.add_job(_job_morning,        "cron", hour=8,  minute=0,  id="morning")
@@ -2724,9 +3073,11 @@ _scheduler.add_job(_job_night,          "cron", hour=23, minute=0,  id="night")
 _scheduler.add_job(_job_daily_report,   "cron", hour=23, minute=50, id="daily_report")
 _scheduler.add_job(_job_weekly_top,     "cron", day_of_week="sun", hour=20, minute=0, id="weekly_top")
 # 🆕 v5.0 — крипто
-_scheduler.add_job(_job_crypto_news,    "interval", hours=1,   id="crypto_news")
 _scheduler.add_job(_job_market_summary, "cron", hour="9,13,17,21", minute=0, id="market_summary")
 _scheduler.add_job(_job_check_alerts,   "interval", minutes=5, id="price_alerts")
+_scheduler.add_job(_job_resolve_predictions, "interval", hours=4, id="resolve_preds")
+_scheduler.add_job(_job_calendar_check, "cron", hour="8,20", minute=0, id="calendar")
+_scheduler.add_job(_job_daily_vote,     "cron", hour=10, minute=0, id="daily_vote")
 _scheduler.start()
 write_log("SCHEDULER | APScheduler v5.0 started (morning=08:00, fact=12:00, night=23:00, "
           "report=23:50, weekly_top=Sun 20:00, crypto_news=1h, market=4x/day, alerts=5min MSK)")

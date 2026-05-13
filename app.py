@@ -24,6 +24,25 @@ import json, os, re, time, threading, datetime, random, sqlite3, hashlib, signal
 from flask import Flask, request
 import requests
 import telebot
+# ── v5.0 modules ─────────────────────────────────────────────────────────────
+from redis_memory import (
+    redis_ok, redis_stats,
+    save_chat_history as _redis_save_hist,
+    get_chat_history_r, get_chat_count_r, clear_chat_history_r,
+    add_global_ctx, get_global_ctx,
+    check_flood_r,
+    get_groq_cache, set_groq_cache,
+    save_user_memory, get_user_memory, get_user_memory_str, delete_user_memory,
+    mark_news_sent, is_news_sent,
+    set_crypto_prices, get_crypto_prices,
+    set_crypto_news, get_crypto_news_cache,
+    add_price_alert, get_all_alerts, remove_alert, get_user_alerts, check_rate_limit,
+)
+from crypto_module import (
+    format_price_message, format_market_message, format_fear_greed,
+    get_crypto_news, format_news_message, check_important_news,
+    format_breaking_news, get_crypto_ai_context, check_price_alerts, COIN_ALIASES,
+)
 from apscheduler.schedulers.background import BackgroundScheduler
 
 app = Flask(__name__)
@@ -172,10 +191,10 @@ class GroqAI:
         if not self.api_key:
             return None
 
-        # Проверяем кэш (только если нет истории)
+        # Проверяем кэш Redis (только если нет истории)
         if not history:
-            cache_key = f"{user_name}:{user_message}"
-            cached = self._get_cached(cache_key)
+            cache_key = self._get_cache_key(f"{user_name}:{user_message}")
+            cached = get_groq_cache(cache_key) or self._get_cached(f"{user_name}:{user_message}")
             if cached:
                 return cached
 
@@ -237,12 +256,15 @@ class GroqAI:
             if "choices" in data and len(data["choices"]) > 0:
                 answer = data["choices"][0]["message"]["content"].strip()
 
-                # Сохраняем в историю
+                # Сохраняем в историю (Redis + SQLite fallback)
                 if user_id:
-                    save_chat_message(user_id, user_message, answer)
+                    if not _redis_save_hist(user_id, user_message, answer):
+                        save_chat_message(user_id, user_message, answer)
 
-                # Кэшируем только простые ответы
+                # Кэшируем в Redis + RAM
                 if not history and not user_id:
+                    ck = self._get_cache_key(f"{user_name}:{user_message}")
+                    set_groq_cache(ck, answer)
                     self._save_cache(f"{user_name}:{user_message}", answer)
 
                 return answer
@@ -264,8 +286,64 @@ class GroqAI:
 
         return self.ask(prompt, "")
 
+# ══════════════════════════════════════════════════════════════════════════════
+# GEMINI AI — резервный AI (Google, бесплатно 1500 req/day)
+# ══════════════════════════════════════════════════════════════════════════════
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+
+class GeminiAI:
+    """Google Gemini 2.0 Flash — резервный AI если Groq не отвечает."""
+
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        self._model = None
+        if api_key:
+            try:
+                import google.generativeai as genai
+                genai.configure(api_key=api_key)
+                self._model = genai.GenerativeModel(
+                    "gemini-2.0-flash",
+                    system_instruction=(
+                        "Ты — дружелюбный бот Statham в Telegram-чате. "
+                        "Отвечай кратко (1-2 предложения), на русском, с эмодзи. "
+                        "Ты эксперт по криптовалютам и финансам. "
+                        "Не пиши длинных эссе — это чат."
+                    )
+                )
+            except Exception as e:
+                write_log(f"GEMINI_INIT_ERR | {e}")
+                self._model = None
+
+    @property
+    def enabled(self):
+        return self._model is not None
+
+    def ask(self, prompt: str, user_name: str = "") -> str | None:
+        if not self._model:
+            return None
+        try:
+            full = f"{user_name}: {prompt}" if user_name else prompt
+            resp = self._model.generate_content(full)
+            return resp.text.strip()[:500] if resp.text else None
+        except Exception as e:
+            write_log(f"GEMINI_ERR | {type(e).__name__} | {e}")
+            return None
+
 # Инициализация AI (если ключ задан)
 ai = GroqAI(GROQ_API_KEY)
+gemini = GeminiAI(GEMINI_API_KEY)
+
+def ask_ai(user_message: str, user_name: str = "", context: str = "",
+           history: list = None, user_id: int = None) -> str | None:
+    """Единая точка вызова AI: сначала Groq, fallback на Gemini."""
+    # Groq (основной — быстрее)
+    resp = ai.ask(user_message, user_name, context=context, history=history, user_id=user_id)
+    if resp:
+        return resp
+    # Gemini (резерв — если Groq не ответил или ключ не задан)
+    if gemini.enabled:
+        return gemini.ask(user_message, user_name)
+    return None
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ЛОГИРОВАНИЕ
@@ -1032,11 +1110,19 @@ def get_bot_answer(text: str, name: str, use_ai: bool = True,
                 return random.choice(answer).format(name=name)
             return answer.format(name=name)
 
-    # 🤖 Если нет шаблонного ответа — спрашиваем AI (Groq) с историей
-    if use_ai and ai.api_key:
-        # Получаем историю диалога
-        history = get_chat_history(user_id, limit=5) if user_id else None
-        ai_response = ai.ask(text, name, history=history, user_id=user_id)
+    # 🤖 Если нет шаблонного ответа — спрашиваем AI (Groq → Gemini fallback)
+    if use_ai and (ai.api_key or gemini.enabled):
+        # История: сначала Redis, потом SQLite
+        if user_id:
+            history = get_chat_history_r(user_id, limit=5) or get_chat_history(user_id, limit=5)
+        else:
+            history = None
+        # Добавляем глобальный контекст чата + память пользователя
+        global_ctx = get_global_ctx(limit=8)
+        user_mem   = get_user_memory_str(user_id) if user_id else ""
+        context_parts = [c for c in [global_ctx, user_mem] if c]
+        context = "\n\n".join(context_parts)
+        ai_response = ask_ai(text, name, context=context, history=history, user_id=user_id)
         if ai_response:
             return ai_response
 
@@ -1135,6 +1221,28 @@ RANDOM_REACTIONS = {
         "Игры — это тоже искусство, {name}! 🕹",
         "Покатали катку, {name}? Как итог? 🏆",
     ],
+    ("биток", "btc", "биткоин", "bitcoin"): [
+        "₿ {name}, биткоин — цифровое золото! Держишь? 💎",
+        "🚀 BTC к луне, {name}? Или ждёшь просадку? 📉",
+        "₿ {name}, видел /price btc? Проверяй прямо здесь! 📊",
+    ],
+    ("крипта", "крипто", "crypto", "альткоины", "defi", "nft"): [
+        "🪙 Крипта — это серьёзно, {name}! Какой держишь портфель? 💼",
+        "📊 {name}, используй /price чтобы следить за рынком!",
+        "🔥 Крипта не спит, {name}! /fear — смотри индекс страха",
+    ],
+    ("эфир", "ethereum", "eth"): [
+        "💎 ETH — умные контракты, DeFi, NFT. {name}, bullish? 🚀",
+        "🔷 {name}, проверь /price eth — всегда актуальные данные!",
+    ],
+    ("фрс", "fed", "ставка", "пауэлл", "powell", "инфляция"): [
+        "🏦 {name}, ФРС и крипта — всегда интрига! /news для свежих новостей 📰",
+        "📊 Макро-данные влияют на BTC, {name}! Смотри /fear после заседаний ФРС",
+    ],
+    ("памп", "pump", "dump", "дамп", "лонг", "шорт"): [
+        "📈 {name}, трейдинг — это наука! Умеешь читать уровни? 🎯",
+        "🎲 {name}, рынок любит неожиданности. /fear покажет настроение толпы!",
+    ],
 }
 
 def check_random_reactions(text: str, name: str) -> str | None:
@@ -1155,13 +1263,17 @@ def should_random_reply() -> bool:
 @bot.message_handler(commands=["start"])
 def cmd_start(m):
     _reply(m, (
-        "👮 <b>Statham Moderation Bot v3.1</b>\n\n"
-        "Слежу за порядком в чате <b>Statham Elite</b>.\n\n"
+        "👮 <b>Statham Bot v5.0</b> — Railway + Redis + Crypto\n\n"
+        "Слежу за порядком в <b>Statham Elite</b> 🚀\n\n"
         "📋 /rules — правила чата\n"
         "❓ /help — все команды\n"
-        "📊 /mystats — твоя статистика\n"
-        "🏆 /top — топ активных участников\n"
-        "🤖 /ai [вопрос] — спросить AI"
+        "📊 /mystats — твоя статистика + XP\n"
+        "🏆 /top — топ участников\n"
+        "🤖 /ai [вопрос] — AI (Groq + Gemini)\n"
+        "📈 /price btc eth — цены крипты\n"
+        "😱 /fear — Fear & Greed Index\n"
+        "📰 /news — крипто-новости\n"
+        "🔔 /alert btc 100000 — ценовой алерт"
     ))
 
 @bot.message_handler(commands=["help"])
@@ -1185,7 +1297,7 @@ def cmd_help(m):
             "/dailyreport — отчёт за сегодня"
         )
     _reply(m, (
-        "👮 <b>Команды Statham Bot v4.0</b>\n\n"
+        "👮 <b>Команды Statham Bot v5.0</b>\n\n"
         "<b>📋 Основные:</b>\n"
         "/start — приветствие\n"
         "/help — эта справка\n"
@@ -1193,19 +1305,27 @@ def cmd_help(m):
         "/mystats — твоя статистика + XP\n"
         "/rank — твой уровень и прогресс\n"
         "/top — топ-10 активных участников\n"
-        "/report — пожаловаться на сообщение (ответом)\n\n"
+        "/report — пожаловаться (ответом на сообщение)\n\n"
+        "<b>📊 Крипта:</b>\n"
+        "/price btc eth sol — цены монет\n"
+        "/fear — Fear & Greed Index\n"
+        "/market — сводка рынка (капа, доминация)\n"
+        "/news — топ крипто-новостей\n"
+        "/alert btc 100000 — алерт когда BTC > $100k\n"
+        "/alerts — мои алерты\n\n"
         "<b>🎮 Мини-игры:</b>\n"
         "/roll — кинуть кубик (1-100)\n"
         "/coin — подбросить монетку\n"
         "/fact — случайный факт\n"
         "/quiz — викторина (ответ числом 1-4)\n\n"
-        "<b>🤖 AI:</b>\n"
+        "<b>🤖 AI (Groq + Gemini):</b>\n"
         "/ai [вопрос] — спросить AI\n"
         "/ask [вопрос] — тоже спросить AI\n"
         "!ai [вопрос] — вызвать AI прямо в чате\n\n"
         "<b>📝 Персонализация:</b>\n"
         "/remember [факт] — запомнить факт о себе\n"
         "/myfacts — показать мои факты\n"
+        "/forget — забыть мои данные\n"
         "/dialogstats — статистика нашего общения"
         + admin_section
     ))
@@ -1606,8 +1726,13 @@ def cmd_remember(m):
         _reply(m, "❌ Слишком длинный факт (макс 200 символов)")
         return
 
-    if save_user_fact(m.from_user.id, fact):
-        _reply(m, f"✅ Запомнил: <i>{fact}</i>\n\nБуду упоминать это в наших разговорах! 😊")
+    uid_rem = m.from_user.id
+    # Сохраняем в Redis (основное) + SQLite (резерв)
+    redis_saved = save_user_memory(uid_rem, "general", fact)
+    sqlite_saved = save_user_fact(uid_rem, fact)
+    if redis_saved or sqlite_saved:
+        storage = "Redis 🔴" if redis_saved else "SQLite 🗄"
+        _reply(m, f"✅ Запомнил ({storage}): <i>{fact}</i>\n\nБуду упоминать это в наших разговорах! 😊")
     else:
         _reply(m, "❌ Не удалось сохранить. Попробуй позже.")
 
@@ -1666,14 +1791,24 @@ def cmd_ai(m):
     except Exception:
         pass
 
-    # Получаем историю и генерируем ответ
-    history = get_chat_history(m.from_user.id, limit=5)
-    response = ai.ask(question, m.from_user.first_name,
-                       context="Прямой вопрос через /ai команду",
-                       history=history, user_id=m.from_user.id)
+    # Получаем историю (Redis → SQLite fallback)
+    uid = m.from_user.id
+    history = get_chat_history_r(uid, limit=5) or get_chat_history(uid, limit=5)
+    # Добавляем крипто-контекст если вопрос про крипту
+    ctx_parts = ["Прямой вопрос через /ai команду"]
+    if any(kw in question.lower() for kw in ["btc","eth","биток","крипта","bitcoin","crypto","цена","рынок"]):
+        crypto_ctx = get_crypto_ai_context()
+        if crypto_ctx: ctx_parts.append(crypto_ctx)
+    user_mem = get_user_memory_str(uid)
+    if user_mem: ctx_parts.append(user_mem)
+    context = "\n".join(ctx_parts)
+
+    response = ask_ai(question, m.from_user.first_name, context=context,
+                      history=history, user_id=uid)
 
     if response:
-        _reply(m, f"🤖 <b>AI отвечает:</b>\n\n{response}")
+        label = "🤖 Groq" if ai.api_key else "🌟 Gemini"
+        _reply(m, f"{label} <b>отвечает:</b>\n\n{response}")
     else:
         _reply(m, "❌ AI не смог ответить. Попробуй другой вопрос или повтори позже.")
 
@@ -1682,8 +1817,10 @@ def cmd_ai(m):
 def cmd_dialogstats(m):
     """📊 Статистика общения с ботом."""
     uid = m.from_user.id
-    count = get_user_chat_count(uid)
-    history = get_chat_history(uid, limit=3)
+    # Redis count is more accurate (includes this session)
+    count_r = get_chat_count_r(uid)
+    count   = count_r or get_user_chat_count(uid)
+    history = get_chat_history_r(uid, limit=3) or get_chat_history(uid, limit=3)
 
     # Определяем уровень "дружбы"
     if count == 0:
@@ -1891,11 +2028,15 @@ def handle_ai_prefix(m):
     # Записываем пользователя
     record_user(m.from_user)
 
-    # Получаем историю и генерируем ответ
-    history = get_chat_history(m.from_user.id, limit=5)
-    response = ai.ask(question, m.from_user.first_name,
-                       context="Явный вызов через !ai префикс",
-                       history=history, user_id=m.from_user.id)
+    # Получаем историю (Redis → SQLite fallback)
+    uid = m.from_user.id
+    history = get_chat_history_r(uid, limit=5) or get_chat_history(uid, limit=5)
+    user_mem = get_user_memory_str(uid)
+    context = "Явный вызов через !ai префикс"
+    if user_mem: context += "\n" + user_mem
+
+    response = ask_ai(question, m.from_user.first_name, context=context,
+                      history=history, user_id=uid)
 
     if response:
         try:
@@ -1920,6 +2061,10 @@ def handle_message(message):
 
     user = message.from_user
     record_user(user)
+
+    # ── Redis: добавляем в глобальный контекст чата ───────────────────────────
+    if message.text:
+        add_global_ctx(user.first_name or "User", message.text)
 
     admin = is_admin(message.chat.id, user.id)
     t     = message.text.lower().strip()
@@ -1961,11 +2106,13 @@ def handle_message(message):
         if admin: return
 
     # ── 12% шанс ответить AI на любое сообщение (для активности) ─────────────
-    if should_random_reply() and ai.api_key:
-        history = get_chat_history(user.id, limit=5)
-        ai_response = ai.ask(message.text[:200], user.first_name,
-                            context="Случайный ответ в чате",
-                            history=history, user_id=user.id)
+    if should_random_reply() and (ai.api_key or gemini.enabled):
+        uid_r = user.id
+        history = get_chat_history_r(uid_r, limit=5) or get_chat_history(uid_r, limit=5)
+        global_ctx = get_global_ctx(limit=5)
+        ai_response = ask_ai(message.text[:200], user.first_name,
+                             context="Случайный ответ в чате\n" + global_ctx,
+                             history=history, user_id=uid_r)
         if ai_response:
             try:
                 _reply_to_with_retry(message, ai_response, parse_mode="HTML")
@@ -1979,8 +2126,8 @@ def handle_message(message):
 
     uid = user.id
 
-    # ── Антифлуд ──────────────────────────────────────────────────────────────
-    if check_flood(uid):
+    # ── Антифлуд (Redis → SQLite fallback) ──────────────────────────────────
+    if check_flood_r(uid) or check_flood(uid):
         try:
             bot.delete_message(message.chat.id, message.message_id)
         except Exception: pass
@@ -2004,6 +2151,188 @@ def handle_message(message):
         write_log(f"BADWORD | {uid} @{getattr(user,'username','')} | word={bad_word}")
         _apply_warn(message.chat.id, user, reason=f"мат: {bad_word}")
         return
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 💎 КРИПТО-КОМАНДЫ (v5.0)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@bot.message_handler(commands=["price", "p", "цена"])
+def cmd_price(m):
+    """📊 Цены криптовалют. /price btc eth sol"""
+    if not check_rate_limit(m.from_user.id, "price", max_calls=10, window=60):
+        _reply(m, "⏳ Слишком частые запросы. Подожди минуту."); return
+    parts = m.text.split()[1:]
+    if not parts:
+        _reply(m, (
+            "📊 <b>Использование:</b> /price [монеты]\n\n"
+            "Примеры:\n"
+            "• /price btc\n"
+            "• /price eth sol bnb\n"
+            "• /price ton биток\n\n"
+            "Поддерживаются: btc, eth, sol, bnb, xrp, ton, ada, doge, ltc, avax, dot, link..."
+        )); return
+    try:
+        bot.send_chat_action(m.chat.id, "typing")
+    except Exception:
+        pass
+    coins = [c.lower() for c in parts[:5]]
+    msg = format_price_message(coins)
+    _reply(m, msg)
+
+
+@bot.message_handler(commands=["fear", "fng", "страх"])
+def cmd_fear(m):
+    """😱 Fear & Greed Index"""
+    if not check_rate_limit(m.from_user.id, "fear", max_calls=5, window=60):
+        _reply(m, "⏳ Слишком частые запросы."); return
+    try:
+        bot.send_chat_action(m.chat.id, "typing")
+    except Exception:
+        pass
+    _reply(m, format_fear_greed())
+
+
+@bot.message_handler(commands=["market", "cap", "рынок"])
+def cmd_market(m):
+    """🌍 Сводка крипторынка"""
+    if not check_rate_limit(m.from_user.id, "market", max_calls=5, window=60):
+        _reply(m, "⏳ Слишком частые запросы."); return
+    try:
+        bot.send_chat_action(m.chat.id, "typing")
+    except Exception:
+        pass
+    _reply(m, format_market_message())
+
+
+@bot.message_handler(commands=["news", "новости", "cn"])
+def cmd_news(m):
+    """📰 Крипто-новости"""
+    if not check_rate_limit(m.from_user.id, "news", max_calls=5, window=60):
+        _reply(m, "⏳ Слишком частые запросы."); return
+    try:
+        bot.send_chat_action(m.chat.id, "typing")
+    except Exception:
+        pass
+    # Пробуем кэш Redis
+    cached = get_crypto_news_cache()
+    if cached:
+        _reply(m, format_news_message(cached) + "\n<i>(кэш)</i>"); return
+    news = get_crypto_news(limit=5)
+    if news:
+        set_crypto_news(news, ttl=1800)
+    _reply(m, format_news_message(news))
+
+
+@bot.message_handler(commands=["alert", "алерт"])
+def cmd_alert(m):
+    """🔔 Ценовой алерт. /alert btc 100000 или /alert btc below 80000"""
+    parts = m.text.split()[1:]
+    if not parts or len(parts) < 2:
+        _reply(m, (
+            "🔔 <b>Ценовой алерт</b>\n\n"
+            "Использование:\n"
+            "• <code>/alert btc 100000</code> — уведомить когда BTC выше $100k\n"
+            "• <code>/alert eth below 3000</code> — уведомить когда ETH ниже $3000\n"
+            "• <code>/alert btc above 95000</code> — явно выше\n\n"
+            "Смотреть алерты: /alerts\n"
+            "Удалить: /delalert btc"
+        )); return
+    coin = parts[0].lower()
+    # Разбираем direction
+    if len(parts) == 3:
+        direction_raw = parts[1].lower()
+        direction = "below" if direction_raw in ("below", "ниже", "под") else "above"
+        try:
+            target = float(parts[2].replace(",", ""))
+        except ValueError:
+            _reply(m, "❌ Неверная цена. Пример: /alert btc 100000"); return
+    else:
+        direction = "above"
+        try:
+            target = float(parts[1].replace(",", ""))
+        except ValueError:
+            _reply(m, "❌ Неверная цена. Пример: /alert btc 100000"); return
+
+    if coin not in COIN_ALIASES and len(coin) > 10:
+        _reply(m, f"❌ Неизвестная монета: {coin.upper()}. Попробуй btc, eth, sol..."); return
+
+    symbol = coin.upper()
+    dir_str = "выше" if direction == "above" else "ниже"
+
+    if add_price_alert(m.from_user.id, coin, target, direction):
+        _reply(m, f"🔔 Алерт установлен!\n\n"
+                  f"Уведомлю когда <b>{symbol}</b> будет {dir_str} "
+                  f"<b>${target:,.0f}</b>\n\n"
+                  f"<i>Проверяется каждые 5 минут</i>")
+    else:
+        _reply(m, "❌ Не удалось установить алерт. Redis должен быть подключён.")
+
+
+@bot.message_handler(commands=["alerts", "алерты"])
+def cmd_alerts(m):
+    """🔔 Мои ценовые алерты"""
+    alerts = get_user_alerts(m.from_user.id)
+    if not alerts:
+        _reply(m, "🔔 Нет активных алертов.\n\nУстанови: /alert btc 100000"); return
+    lines = ["🔔 <b>Твои алерты:</b>\n"]
+    for a in alerts:
+        dir_str = "📈 выше" if a["dir"] == "above" else "📉 ниже"
+        lines.append(f"• <b>{a['coin']}</b> {dir_str} ${a['target']:,.0f}")
+    lines.append("\nУдалить: /delalert btc")
+    _reply(m, "\n".join(lines))
+
+
+@bot.message_handler(commands=["delalert", "удалерт"])
+def cmd_delalert(m):
+    """🗑 Удалить алерт. /delalert btc"""
+    parts = m.text.split()[1:]
+    if not parts:
+        _reply(m, "Использование: /delalert btc"); return
+    coin = parts[0].upper()
+    remove_alert(m.from_user.id, coin)
+    _reply(m, f"✅ Алерт на {coin} удалён.")
+
+
+@bot.message_handler(commands=["forget", "забудь"])
+def cmd_forget(m):
+    """🗑 Забыть мою историю диалогов и память"""
+    uid_f = m.from_user.id
+    clear_chat_history_r(uid_f)
+    # Чистим и из SQLite
+    with _db_lock:
+        conn = get_db()
+        try:
+            conn.execute("DELETE FROM chat_history WHERE user_id=?", (uid_f,))
+            conn.commit()
+        finally:
+            conn.close()
+    _reply(m, (
+        "✅ Готово! Забыл нашу историю диалогов.\n\n"
+        "Факты о тебе (<code>/remember</code>) сохранены.\n"
+        "Чтобы удалить — используй <code>/myfacts</code> и скажи мне что удалить."
+    ))
+
+
+@bot.message_handler(commands=["redisstat", "redis"])
+def cmd_redis_stat(m):
+    """📊 Статус Redis (только для админов)"""
+    if not is_admin(m.chat.id, m.from_user.id):
+        _reply(m, "❌ Только для администраторов."); return
+    stats = redis_stats()
+    gemini_status = "✅ Подключён" if gemini.enabled else "❌ Ключ не задан"
+    groq_status = "✅ Подключён" if ai.api_key else "❌ Ключ не задан"
+    lines = [
+        "🔴 <b>Redis статус</b>",
+        f"Статус: {stats.get('status', '?')}",
+        f"Ключей: {stats.get('keys', '?')}",
+        f"Память: {stats.get('memory', '?')}",
+        "",
+        "🤖 <b>AI статус</b>",
+        f"Groq: {groq_status}",
+        f"Gemini: {gemini_status}",
+    ]
+    _reply(m, "\n".join(lines))
 
 # ══════════════════════════════════════════════════════════════════════════════
 # WEBHOOK + FLASK ROUTES
@@ -2333,14 +2662,74 @@ def _job_weekly_top():
         write_log(f"WEEKLY_TOP_ERR | {e}")
 
 # Инициализация планировщика
+# ══ Новые крипто-задачи (v5.0) ════════════════════════════════════════════════
+
+def _job_crypto_news():
+    """Проверка важных новостей каждый час (ФРС, SEC, взломы, хайп)."""
+    write_log("SCHEDULER | crypto_news check")
+    try:
+        important = check_important_news(sent_checker=is_news_sent)
+        if important:
+            text = format_breaking_news(important)
+            for n in important:
+                mark_news_sent(n["id"])
+            _send_scheduled_message(text)
+            write_log(f"SCHEDULER | sent {len(important)} important news")
+    except Exception as e:
+        write_log(f"CRYPTO_NEWS_ERR | {e}")
+
+
+def _job_market_summary():
+    """Сводка рынка 4 раза в день: 9:00, 13:00, 17:00, 21:00 МСК."""
+    write_log("SCHEDULER | market_summary")
+    try:
+        price_msg  = format_price_message(["btc", "eth", "sol", "bnb", "ton"])
+        fg_msg     = format_fear_greed()
+        full_msg   = price_msg + "\n\n" + fg_msg
+        _send_scheduled_message(full_msg)
+    except Exception as e:
+        write_log(f"MARKET_SUMMARY_ERR | {e}")
+
+
+def _job_check_alerts():
+    """Проверка ценовых алертов каждые 5 минут."""
+    try:
+        all_alerts = get_all_alerts()
+        if not all_alerts:
+            return
+        triggered = check_price_alerts(all_alerts)
+        for a in triggered:
+            uid_alert = a["uid"]
+            dir_str = "достиг" if a["dir"] == "above" else "упал до"
+            text = (
+                f"🔔 <b>Алерт сработал!</b>\n\n"
+                f"<b>{a['coin']}</b> {dir_str} <b>${a['current_price']:,.0f}</b>\n"
+                f"Твоя цель: ${a['target']:,.0f}"
+            )
+            try:
+                bot.send_message(uid_alert, text, parse_mode="HTML")
+            except Exception:
+                pass
+            remove_alert(uid_alert, a["coin"])
+        if triggered:
+            write_log(f"ALERTS | triggered {len(triggered)} alerts")
+    except Exception as e:
+        write_log(f"ALERT_CHECK_ERR | {e}")
+
+
 _scheduler = BackgroundScheduler(timezone="Europe/Moscow", daemon=True)
-_scheduler.add_job(_job_morning,      "cron", hour=8,  minute=0,  id="morning")
-_scheduler.add_job(_job_factofday,    "cron", hour=12, minute=0,  id="factofday")
-_scheduler.add_job(_job_night,        "cron", hour=23, minute=0,  id="night")
-_scheduler.add_job(_job_daily_report, "cron", hour=23, minute=50, id="daily_report")
-_scheduler.add_job(_job_weekly_top,   "cron", day_of_week="sun", hour=20, minute=0, id="weekly_top")
+_scheduler.add_job(_job_morning,        "cron", hour=8,  minute=0,  id="morning")
+_scheduler.add_job(_job_factofday,      "cron", hour=12, minute=0,  id="factofday")
+_scheduler.add_job(_job_night,          "cron", hour=23, minute=0,  id="night")
+_scheduler.add_job(_job_daily_report,   "cron", hour=23, minute=50, id="daily_report")
+_scheduler.add_job(_job_weekly_top,     "cron", day_of_week="sun", hour=20, minute=0, id="weekly_top")
+# 🆕 v5.0 — крипто
+_scheduler.add_job(_job_crypto_news,    "interval", hours=1,   id="crypto_news")
+_scheduler.add_job(_job_market_summary, "cron", hour="9,13,17,21", minute=0, id="market_summary")
+_scheduler.add_job(_job_check_alerts,   "interval", minutes=5, id="price_alerts")
 _scheduler.start()
-write_log("SCHEDULER | APScheduler started (morning=08:00, fact=12:00, night=23:00, report=23:50, weekly_top=Sun 20:00 MSK)")
+write_log("SCHEDULER | APScheduler v5.0 started (morning=08:00, fact=12:00, night=23:00, "
+          "report=23:50, weekly_top=Sun 20:00, crypto_news=1h, market=4x/day, alerts=5min MSK)")
 
 # Graceful shutdown при SIGTERM (Railway останавливает контейнер через SIGTERM)
 def _handle_shutdown(sig, frame):

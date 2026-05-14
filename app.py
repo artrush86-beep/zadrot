@@ -91,7 +91,7 @@ BASE_DIR   = os.environ.get("DATA_DIR", os.path.join(os.path.dirname(os.path.abs
 os.makedirs(BASE_DIR, exist_ok=True)
 DB_PATH    = os.path.join(BASE_DIR, "bot.db")
 LOG_FILE   = os.path.join(BASE_DIR, "mod_log.txt")
-PHOTO_PATH = os.path.join(BASE_DIR, "helloboys.png")
+PHOTO_PATH = os.path.join(os.path.dirname(__file__), "hello.jpg")
 CONFIG_FILE = os.path.join(BASE_DIR, "bot_config.json")
 
 # ── Fallback: config file (если нет UI для переменных окружения) ─────────────
@@ -2603,6 +2603,37 @@ def cmd_summary(m):
     else:
         _reply(m, "❌ AI не смог обработать запрос.")
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 📱 TELEGRAM MINI APP
+# ══════════════════════════════════════════════════════════════════════════════
+
+@bot.message_handler(commands=["app", "webapp", "mini", "портал"])
+def cmd_webapp(m):
+    """📱 Открыть Mini App — портфель, цены, алерты, календарь."""
+    if not RAILWAY_DOMAIN:
+        _reply(m, "❌ RAILWAY_DOMAIN не задан в настройках."); return
+    url = f"https://{RAILWAY_DOMAIN}/miniapp/"
+    markup = telebot.types.InlineKeyboardMarkup()
+    markup.add(telebot.types.InlineKeyboardButton(
+        text="📊 Открыть Statham App",
+        web_app=telebot.types.WebAppInfo(url=url)
+    ))
+    try:
+        bot.send_message(
+            m.chat.id,
+            "📱 <b>Statham Mini App</b>\n\n"
+            "Полноценный крипто-дашборд прямо в Telegram:\n"
+            "• 📊 Цены BTC/ETH/SOL/BNB/TON + Fear&Greed\n"
+            "• 💼 Личный портфель с оценкой\n"
+            "• 🔔 Ценовые алерты\n"
+            "• 📅 Календарь ФРС и макро-событий",
+            parse_mode="HTML",
+            reply_markup=markup
+        )
+    except Exception:
+        _reply(m, f"📱 <b>Statham App:</b>\n{url}")
+
 # ══════════════════════════════════════════════════════════════════════════════
 # WEBHOOK + FLASK ROUTES
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2835,6 +2866,21 @@ new Chart(document.getElementById('hourChart'), {{
         return html, 200, {"Content-Type": "text/html; charset=utf-8"}
     except Exception as e:
         return f"<pre>Error: {e}</pre>", 200, {"Content-Type": "text/html; charset=utf-8"}
+
+
+@app.route("/miniapp/")
+@app.route("/miniapp/<path:filename>")
+def serve_miniapp(filename="index.html"):
+    """Отдаёт файлы Telegram Mini App."""
+    import os
+    from flask import send_from_directory, abort
+    miniapp_dir = os.path.join(os.path.dirname(__file__), "miniapp")
+    if not os.path.exists(miniapp_dir):
+        abort(404)
+    # Безопасность: только html/js/css/json
+    safe = filename.replace("..", "").lstrip("/")
+    if not safe: safe = "index.html"
+    return send_from_directory(miniapp_dir, safe)
 
 
 @app.route("/health")
@@ -3090,8 +3136,10 @@ def _handle_shutdown(sig, frame):
 
 signal.signal(signal.SIGTERM, _handle_shutdown)
 
-MORNING_PHOTO_PATH = os.path.join(BASE_DIR, "morning.png")
-NIGHT_PHOTO_PATH = os.path.join(BASE_DIR, "night.png")
+# 📸 Фото для утреннего/вечернего поста
+# Положи hello.jpg и goodb.jpg в корень репозитория
+MORNING_PHOTO_PATH = os.path.join(os.path.dirname(__file__), "hello.jpg")
+NIGHT_PHOTO_PATH   = os.path.join(os.path.dirname(__file__), "goodb.jpg")
 
 MORNING_MESSAGES = [
     "☀️ Доброе утро, чат! Пусть этот день будет продуктивным и позитивным! 💪",

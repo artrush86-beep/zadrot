@@ -1,0 +1,546 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>Statham Bot</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --card: #161b22;
+      --border: #30363d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --green: #3fb950;
+      --red: #f85149;
+      --orange: #d29922;
+      --blue: #58a6ff;
+      --purple: #bc8cff;
+      --accent: #f78166;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg); color: var(--text);
+      min-height: 100vh; padding-bottom: 80px;
+    }
+    /* ── HEADER ─────────────────────────────────────────────────── */
+    .header {
+      background: var(--card);
+      border-bottom: 1px solid var(--border);
+      padding: 14px 16px;
+      display: flex; align-items: center; gap: 10px;
+      position: sticky; top: 0; z-index: 100;
+    }
+    .header-logo { font-size: 24px; }
+    .header-title { font-size: 17px; font-weight: 700; }
+    .header-sub { font-size: 12px; color: var(--muted); }
+    /* ── NAV ────────────────────────────────────────────────────── */
+    .nav {
+      position: fixed; bottom: 0; left: 0; right: 0;
+      background: var(--card); border-top: 1px solid var(--border);
+      display: flex; z-index: 100;
+    }
+    .nav-btn {
+      flex: 1; padding: 10px 4px 8px;
+      background: none; border: none; color: var(--muted);
+      font-size: 11px; cursor: pointer;
+      display: flex; flex-direction: column; align-items: center; gap: 3px;
+      transition: color .15s;
+    }
+    .nav-btn .icon { font-size: 20px; }
+    .nav-btn.active { color: var(--blue); }
+    /* ── PAGES ──────────────────────────────────────────────────── */
+    .page { display: none; padding: 12px 14px; }
+    .page.active { display: block; }
+    /* ── CARDS ──────────────────────────────────────────────────── */
+    .card {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 12px; padding: 14px; margin-bottom: 10px;
+    }
+    .card-title {
+      font-size: 12px; color: var(--muted); text-transform: uppercase;
+      letter-spacing: .5px; margin-bottom: 8px;
+    }
+    /* ── PRICES ─────────────────────────────────────────────────── */
+    .coin-row {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 10px 0; border-bottom: 1px solid var(--border);
+    }
+    .coin-row:last-child { border-bottom: none; }
+    .coin-left { display: flex; align-items: center; gap: 10px; }
+    .coin-icon { width: 36px; height: 36px; border-radius: 50%; font-size: 20px;
+                 display: flex; align-items: center; justify-content: center;
+                 background: var(--bg); }
+    .coin-name { font-weight: 600; font-size: 15px; }
+    .coin-rank { font-size: 11px; color: var(--muted); }
+    .coin-right { text-align: right; }
+    .coin-price { font-weight: 700; font-size: 15px; }
+    .change-pos { color: var(--green); font-size: 13px; }
+    .change-neg { color: var(--red); font-size: 13px; }
+    /* ── F&G ────────────────────────────────────────────────────── */
+    .fg-value { font-size: 48px; font-weight: 800; text-align: center; margin: 8px 0 4px; }
+    .fg-label { text-align: center; font-size: 16px; margin-bottom: 12px; }
+    .fg-bar-wrap { height: 10px; background: var(--border); border-radius: 5px; overflow: hidden; margin-bottom: 6px; }
+    .fg-bar { height: 100%; border-radius: 5px; transition: width .6s ease; }
+    .fg-range { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); }
+    /* ── PORTFOLIO ──────────────────────────────────────────────── */
+    .port-total { font-size: 30px; font-weight: 800; text-align: center; margin: 6px 0 2px; }
+    .port-change { text-align: center; font-size: 14px; margin-bottom: 12px; }
+    .port-coin {
+      display: flex; align-items: center; justify-content: space-between; padding: 9px 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .port-coin:last-child { border-bottom: none; }
+    .port-coin-left { display: flex; align-items: center; gap: 9px; }
+    .port-coin-amount { font-size: 12px; color: var(--muted); }
+    .port-share-bar { width: 60px; height: 4px; background: var(--border); border-radius: 2px; }
+    .port-share-fill { height: 4px; border-radius: 2px; background: var(--blue); }
+    .add-btn {
+      width: 100%; padding: 12px; border-radius: 10px;
+      background: var(--blue); border: none; color: #fff;
+      font-size: 15px; font-weight: 600; cursor: pointer; margin-top: 10px;
+    }
+    .add-btn:active { opacity: .8; }
+    /* ── ALERTS ─────────────────────────────────────────────────── */
+    .alert-row {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 10px 0; border-bottom: 1px solid var(--border);
+    }
+    .alert-row:last-child { border-bottom: none; }
+    .alert-dir { font-size: 18px; }
+    .alert-coin { font-weight: 600; }
+    .alert-target { color: var(--muted); font-size: 13px; }
+    .del-btn { background: none; border: none; color: var(--red); font-size: 18px; cursor: pointer; }
+    /* ── CALENDAR ───────────────────────────────────────────────── */
+    .event-row { padding: 10px 0; border-bottom: 1px solid var(--border); }
+    .event-row:last-child { border-bottom: none; }
+    .event-impact { display: inline-block; padding: 2px 7px; border-radius: 4px;
+                    font-size: 11px; font-weight: 600; margin-bottom: 4px; }
+    .impact-high { background: rgba(248,81,73,.2); color: var(--red); }
+    .impact-medium { background: rgba(210,153,34,.2); color: var(--orange); }
+    .event-title { font-size: 14px; margin-bottom: 3px; }
+    .event-when { font-size: 12px; color: var(--muted); }
+    /* ── LOADING / EMPTY ────────────────────────────────────────── */
+    .loader { text-align: center; padding: 40px; color: var(--muted); font-size: 14px; }
+    .spinner { font-size: 28px; animation: spin 1s linear infinite; display: block; margin-bottom: 8px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .empty { text-align: center; padding: 30px; color: var(--muted); }
+    /* ── INPUT ROW ──────────────────────────────────────────────── */
+    .input-row { display: flex; gap: 8px; margin-top: 10px; }
+    .inp {
+      flex: 1; background: var(--bg); border: 1px solid var(--border);
+      border-radius: 8px; padding: 10px 12px; color: var(--text);
+      font-size: 14px;
+    }
+    .inp:focus { outline: none; border-color: var(--blue); }
+    .inp-btn {
+      padding: 10px 14px; background: var(--blue); border: none;
+      border-radius: 8px; color: #fff; font-size: 14px; font-weight: 600; cursor: pointer;
+    }
+    .toast {
+      position: fixed; bottom: 90px; left: 50%; transform: translateX(-50%);
+      background: #238636; color: #fff; padding: 10px 18px;
+      border-radius: 8px; font-size: 14px; z-index: 999;
+      opacity: 0; transition: opacity .3s;
+    }
+    .toast.show { opacity: 1; }
+  </style>
+</head>
+<body>
+
+<!-- HEADER -->
+<div class="header">
+  <div class="header-logo">🤖</div>
+  <div>
+    <div class="header-title">Statham Bot</div>
+    <div class="header-sub" id="header-sub">Загрузка...</div>
+  </div>
+</div>
+
+<!-- PAGES -->
+
+<!-- 📊 PRICES -->
+<div class="page active" id="page-prices">
+  <div class="card">
+    <div class="card-title">📊 Крипто-цены</div>
+    <div id="prices-list"><div class="loader"><span class="spinner">⏳</span>Загружаем цены...</div></div>
+  </div>
+  <div class="card">
+    <div class="card-title">😱 Fear & Greed Index</div>
+    <div id="fg-block"><div class="loader"><span class="spinner">⏳</span></div></div>
+  </div>
+</div>
+
+<!-- 💼 PORTFOLIO -->
+<div class="page" id="page-port">
+  <div class="card">
+    <div class="card-title">💼 Мой портфель</div>
+    <div id="port-total" class="port-total">—</div>
+    <div id="port-change" class="port-change"></div>
+    <div id="port-list"><div class="loader"><span class="spinner">⏳</span></div></div>
+  </div>
+  <div class="card">
+    <div class="card-title">➕ Добавить монету</div>
+    <div class="input-row">
+      <input class="inp" id="add-coin" placeholder="btc" style="max-width:80px">
+      <input class="inp" id="add-amount" placeholder="0.5" type="number" step="any" min="0">
+      <button class="inp-btn" onclick="addCoin()">OK</button>
+    </div>
+  </div>
+</div>
+
+<!-- 🔔 ALERTS -->
+<div class="page" id="page-alerts">
+  <div class="card">
+    <div class="card-title">🔔 Ценовые алерты</div>
+    <div id="alerts-list"><div class="loader"><span class="spinner">⏳</span></div></div>
+  </div>
+  <div class="card">
+    <div class="card-title">➕ Новый алерт</div>
+    <div class="input-row">
+      <input class="inp" id="al-coin" placeholder="btc" style="max-width:60px">
+      <select class="inp" id="al-dir" style="max-width:90px">
+        <option value="above">📈 выше</option>
+        <option value="below">📉 ниже</option>
+      </select>
+      <input class="inp" id="al-price" placeholder="95000" type="number" min="0">
+      <button class="inp-btn" onclick="addAlert()">OK</button>
+    </div>
+  </div>
+</div>
+
+<!-- 📅 CALENDAR -->
+<div class="page" id="page-cal">
+  <div class="card">
+    <div class="card-title">📅 Экономический календарь</div>
+    <div id="cal-list"><div class="loader"><span class="spinner">⏳</span></div></div>
+  </div>
+</div>
+
+<!-- NAV -->
+<nav class="nav">
+  <button class="nav-btn active" onclick="nav('prices',this)">
+    <span class="icon">📊</span>Цены
+  </button>
+  <button class="nav-btn" onclick="nav('port',this)">
+    <span class="icon">💼</span>Портфель
+  </button>
+  <button class="nav-btn" onclick="nav('alerts',this)">
+    <span class="icon">🔔</span>Алерты
+  </button>
+  <button class="nav-btn" onclick="nav('cal',this)">
+    <span class="icon">📅</span>Календарь
+  </button>
+</nav>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ── Telegram WebApp init ──────────────────────────────────────────────────────
+const tg = window.Telegram?.WebApp;
+if (tg) {
+  tg.ready();
+  tg.expand();
+  // Подстраиваем цвета под тему Telegram
+  if (tg.colorScheme === 'light') {
+    document.documentElement.style.setProperty('--bg', '#f0f0f0');
+    document.documentElement.style.setProperty('--card', '#ffffff');
+    document.documentElement.style.setProperty('--text', '#000000');
+    document.documentElement.style.setProperty('--border', '#e0e0e0');
+    document.documentElement.style.setProperty('--muted', '#666666');
+  }
+}
+
+const USER_ID = tg?.initDataUnsafe?.user?.id || 'demo';
+const BOT_DOMAIN = window.location.hostname; // Railway domain
+
+// ── Navigation ────────────────────────────────────────────────────────────────
+function nav(pageId, btn) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('page-' + pageId).classList.add('active');
+  btn.classList.add('active');
+  if (pageId === 'prices') loadPrices();
+  if (pageId === 'port')   loadPortfolio();
+  if (pageId === 'alerts') loadAlerts();
+  if (pageId === 'cal')    loadCalendar();
+}
+
+// ── Toast ─────────────────────────────────────────────────────────────────────
+function toast(msg, color='#238636') {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.style.background = color;
+  el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), 2500);
+}
+
+// ── Форматирование ────────────────────────────────────────────────────────────
+function fmtPrice(p) {
+  if (!p) return '—';
+  if (p >= 1000)  return '$' + p.toLocaleString('en', {maximumFractionDigits:0});
+  if (p >= 1)     return '$' + p.toFixed(2);
+  if (p >= 0.01)  return '$' + p.toFixed(4);
+  return '$' + p.toFixed(8);
+}
+function fmtPct(v) {
+  if (v == null) return '—';
+  const cls = v >= 0 ? 'change-pos' : 'change-neg';
+  return `<span class="${cls}">${v >= 0 ? '+' : ''}${v.toFixed(2)}%</span>`;
+}
+function fgColor(v) {
+  if (v <= 24)  return '#f85149';
+  if (v <= 44)  return '#d29922';
+  if (v <= 55)  return '#8b949e';
+  if (v <= 74)  return '#3fb950';
+  return '#58a6ff';
+}
+function fgLabel(v) {
+  if (v <= 24)  return '😱 Extreme Fear';
+  if (v <= 44)  return '😨 Fear';
+  if (v <= 55)  return '😐 Neutral';
+  if (v <= 74)  return '😏 Greed';
+  return '🤑 Extreme Greed';
+}
+
+// ── API calls (через Railway backend) ─────────────────────────────────────────
+async function api(path) {
+  try {
+    const r = await fetch(`https://${BOT_DOMAIN}${path}`);
+    if (!r.ok) throw new Error(r.status);
+    return await r.json();
+  } catch(e) {
+    console.error('API error', path, e);
+    return null;
+  }
+}
+
+// ── PRICES ────────────────────────────────────────────────────────────────────
+const COINS = [
+  {id:'bitcoin',    sym:'BTC', icon:'₿'},
+  {id:'ethereum',   sym:'ETH', icon:'Ξ'},
+  {id:'solana',     sym:'SOL', icon:'◎'},
+  {id:'binancecoin',sym:'BNB', icon:'⬡'},
+  {id:'the-open-network', sym:'TON', icon:'💎'},
+];
+
+async function loadPrices() {
+  const ids = COINS.map(c => c.id).join(',');
+  const url = `https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids=${ids}&price_change_percentage=24h&order=market_cap_desc`;
+  const el = document.getElementById('prices-list');
+  try {
+    const r = await fetch(url);
+    const data = await r.json();
+    if (!data?.length) { el.innerHTML = '<div class="empty">Нет данных</div>'; return; }
+    const map = {};
+    data.forEach(d => map[d.id] = d);
+    el.innerHTML = COINS.map(c => {
+      const d = map[c.id];
+      if (!d) return '';
+      return `<div class="coin-row">
+        <div class="coin-left">
+          <div class="coin-icon">${c.icon}</div>
+          <div><div class="coin-name">${c.sym}</div><div class="coin-rank">#${d.market_cap_rank}</div></div>
+        </div>
+        <div class="coin-right">
+          <div class="coin-price">${fmtPrice(d.current_price)}</div>
+          <div>${fmtPct(d.price_change_percentage_24h)}</div>
+        </div>
+      </div>`;
+    }).join('');
+    document.getElementById('header-sub').textContent =
+      'BTC ' + fmtPrice(map['bitcoin']?.current_price);
+  } catch(e) {
+    el.innerHTML = '<div class="empty">⚠️ Ошибка загрузки цен</div>';
+  }
+  loadFearGreed();
+}
+
+async function loadFearGreed() {
+  const el = document.getElementById('fg-block');
+  try {
+    const r = await fetch('https://api.alternative.me/fng/?limit=1');
+    const j = await r.json();
+    const d = j.data[0];
+    const v = parseInt(d.value);
+    const color = fgColor(v);
+    const label = fgLabel(v);
+    el.innerHTML = `
+      <div class="fg-value" style="color:${color}">${v}</div>
+      <div class="fg-label">${label}</div>
+      <div class="fg-bar-wrap">
+        <div class="fg-bar" style="width:${v}%;background:${color}"></div>
+      </div>
+      <div class="fg-range"><span>Страх 0</span><span>100 Жадность</span></div>`;
+  } catch(e) {
+    el.innerHTML = '<div class="empty">⚠️ F&G недоступен</div>';
+  }
+}
+
+// ── PORTFOLIO (localStorage для MVP) ─────────────────────────────────────────
+function getPortfolio() {
+  try { return JSON.parse(localStorage.getItem('port_' + USER_ID) || '{}'); }
+  catch { return {}; }
+}
+function savePortfolio(p) {
+  localStorage.setItem('port_' + USER_ID, JSON.stringify(p));
+}
+
+async function loadPortfolio() {
+  const port = getPortfolio();
+  const el = document.getElementById('port-list');
+  const keys = Object.keys(port);
+  if (!keys.length) {
+    document.getElementById('port-total').textContent = '$0';
+    document.getElementById('port-change').textContent = 'Портфель пуст';
+    el.innerHTML = '<div class="empty">Добавь монеты ниже 👇</div>';
+    return;
+  }
+  // Получаем цены
+  const coinIds = keys.map(k => {
+    const map = {btc:'bitcoin',eth:'ethereum',sol:'solana',bnb:'binancecoin',
+                  ton:'the-open-network',xrp:'ripple',ada:'cardano',doge:'dogecoin',
+                  avax:'avalanche-2',dot:'polkadot',link:'chainlink'};
+    return map[k] || k;
+  });
+  try {
+    const r = await fetch(`https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids=${coinIds.join(',')}&price_change_percentage=24h`);
+    const data = await r.json();
+    const priceMap = {};
+    data.forEach(d => priceMap[d.id] = d);
+    // Считаем
+    let total = 0, totalPrev = 0;
+    const rows = keys.map(coin => {
+      const cid = coinIds[keys.indexOf(coin)];
+      const d = priceMap[cid];
+      const amount = port[coin];
+      if (!d) return { coin, amount, value: 0, pct: 0, price: 0 };
+      const value = amount * d.current_price;
+      const pct = d.price_change_percentage_24h || 0;
+      const prevValue = value / (1 + pct/100);
+      total += value; totalPrev += prevValue;
+      return { coin: coin.toUpperCase(), amount, value, pct, price: d.current_price };
+    }).sort((a,b) => b.value - a.value);
+
+    const totalChange = totalPrev > 0 ? (total - totalPrev) / totalPrev * 100 : 0;
+    document.getElementById('port-total').textContent = '$' + total.toLocaleString('en', {maximumFractionDigits:2});
+    document.getElementById('port-change').innerHTML = fmtPct(totalChange) + ' за 24ч';
+
+    el.innerHTML = rows.map(row => {
+      if (!row.value) return '';
+      const share = total > 0 ? row.value / total * 100 : 0;
+      return `<div class="port-coin">
+        <div class="port-coin-left">
+          <div>
+            <div style="font-weight:600">${row.coin}</div>
+            <div class="port-coin-amount">${row.amount.toLocaleString('en', {maximumFractionDigits:8})} × ${fmtPrice(row.price)}</div>
+          </div>
+        </div>
+        <div style="text-align:right">
+          <div style="font-weight:600">$${row.value.toLocaleString('en',{maximumFractionDigits:2})}</div>
+          <div>${fmtPct(row.pct)}</div>
+          <div class="port-share-bar" style="margin-top:4px;margin-left:auto">
+            <div class="port-share-fill" style="width:${Math.min(share,100)}%"></div>
+          </div>
+        </div>
+      </div>`;
+    }).join('') ||
+    '<div class="empty">Нет данных</div>';
+  } catch {
+    el.innerHTML = '<div class="empty">⚠️ Ошибка загрузки</div>';
+  }
+}
+
+function addCoin() {
+  const coin = document.getElementById('add-coin').value.trim().toLowerCase();
+  const amount = parseFloat(document.getElementById('add-amount').value);
+  if (!coin || !amount || amount <= 0) { toast('Укажи монету и количество', '#f85149'); return; }
+  const p = getPortfolio();
+  p[coin] = (p[coin] || 0) + amount;
+  savePortfolio(p);
+  document.getElementById('add-coin').value = '';
+  document.getElementById('add-amount').value = '';
+  toast(`✅ ${coin.toUpperCase()} добавлен`);
+  loadPortfolio();
+}
+
+// ── ALERTS ────────────────────────────────────────────────────────────────────
+function getAlerts() {
+  try { return JSON.parse(localStorage.getItem('alerts_' + USER_ID) || '[]'); }
+  catch { return []; }
+}
+function saveAlerts(a) { localStorage.setItem('alerts_' + USER_ID, JSON.stringify(a)); }
+
+function loadAlerts() {
+  const alerts = getAlerts();
+  const el = document.getElementById('alerts-list');
+  if (!alerts.length) {
+    el.innerHTML = '<div class="empty">Нет алертов</div>'; return;
+  }
+  el.innerHTML = alerts.map((a, i) => `
+    <div class="alert-row">
+      <div>
+        <div><span class="alert-dir">${a.dir === 'above' ? '📈' : '📉'}</span>
+          <span class="alert-coin"> ${a.coin}</span>
+        </div>
+        <div class="alert-target">${a.dir === 'above' ? 'выше' : 'ниже'} $${Number(a.target).toLocaleString('en')}</div>
+      </div>
+      <button class="del-btn" onclick="delAlert(${i})">🗑</button>
+    </div>`).join('');
+}
+
+function addAlert() {
+  const coin   = document.getElementById('al-coin').value.trim().toUpperCase();
+  const dir    = document.getElementById('al-dir').value;
+  const target = parseFloat(document.getElementById('al-price').value);
+  if (!coin || !target) { toast('Заполни все поля', '#f85149'); return; }
+  const alerts = getAlerts();
+  alerts.push({ coin, dir, target });
+  saveAlerts(alerts);
+  document.getElementById('al-coin').value = '';
+  document.getElementById('al-price').value = '';
+  toast(`🔔 Алерт на ${coin} установлен`);
+  loadAlerts();
+}
+
+function delAlert(idx) {
+  const alerts = getAlerts();
+  alerts.splice(idx, 1);
+  saveAlerts(alerts);
+  toast('Алерт удалён', '#6e7681');
+  loadAlerts();
+}
+
+// ── CALENDAR ──────────────────────────────────────────────────────────────────
+const FED_DATES = [
+  "2026-01-28","2026-03-18","2026-04-29",
+  "2026-06-17","2026-07-29","2026-09-16",
+  "2026-10-28","2026-12-09",
+];
+
+function loadCalendar() {
+  const el = document.getElementById('cal-list');
+  const today = new Date().toISOString().slice(0,10);
+  const upcoming = FED_DATES.filter(d => d >= today).slice(0,8);
+  if (!upcoming.length) { el.innerHTML = '<div class="empty">Нет предстоящих событий</div>'; return; }
+  el.innerHTML = upcoming.map(d => {
+    const dt = new Date(d + 'T00:00:00');
+    const label = dt.toLocaleDateString('ru', {day:'numeric', month:'long', weekday:'short'});
+    const daysLeft = Math.round((dt - new Date()) / 86400000);
+    const urgency = daysLeft <= 3 ? 'impact-high' : 'impact-medium';
+    const urgencyLabel = daysLeft <= 3 ? '🔴 Скоро' : '🟡 Запланировано';
+    return `<div class="event-row">
+      <span class="event-impact ${urgency}">${urgencyLabel}</span>
+      <div class="event-title">🏦 Заседание ФРС — Решение по ставке</div>
+      <div class="event-when">📅 ${label} &nbsp;·&nbsp; через ${daysLeft} дн.</div>
+    </div>`;
+  }).join('');
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+loadPrices();
+</script>
+</body>
+</html>

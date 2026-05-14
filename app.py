@@ -33,9 +33,7 @@ from redis_memory import (
     check_flood_r,
     get_groq_cache, set_groq_cache,
     save_user_memory, get_user_memory, get_user_memory_str, delete_user_memory,
-    mark_news_sent, is_news_sent,
     set_crypto_prices, get_crypto_prices,
-    set_crypto_news, get_crypto_news_cache,
     add_price_alert, get_all_alerts, remove_alert, get_user_alerts, check_rate_limit,
 )
 from crypto_module import (
@@ -46,12 +44,12 @@ from chart_module import (
     format_chart_message, format_movers_message,
     format_altseason_message, format_funding_message, format_tvl_message,
 )
-from portfolio_module import handle_portfolio_command, give_achievement as port_ach
+from portfolio_module import handle_portfolio_command
 from calendar_module import (
     format_calendar_message, check_events_today, check_events_soon, format_event_alert,
 )
 from game_module import (
-    CRYPTO_LEVEL_NAMES, give_achievement, get_achievements, format_achievements,
+    give_achievement, get_achievements, format_achievements,
     make_prediction, get_active_predictions, resolve_predictions,
     save_predict_stats, get_predict_stats, format_predict_stats,
     get_prediction_leaderboard, get_daily_question, vote,
@@ -1251,7 +1249,7 @@ RANDOM_REACTIONS = {
         "🔷 {name}, проверь /price eth — всегда актуальные данные!",
     ],
     ("фрс", "fed", "ставка", "пауэлл", "powell", "инфляция"): [
-        "🏦 {name}, ФРС и крипта — всегда интрига! /news для свежих новостей 📰",
+        "🏦 {name}, ФРС и крипта — всегда интрига! /calendar для событий 📅",
         "📊 Макро-данные влияют на BTC, {name}! Смотри /fear после заседаний ФРС",
     ],
     ("памп", "pump", "dump", "дамп", "лонг", "шорт"): [
@@ -2611,9 +2609,9 @@ def cmd_summary(m):
 @bot.message_handler(commands=["app", "webapp", "mini", "портал"])
 def cmd_webapp(m):
     """📱 Открыть Mini App — портфель, цены, алерты, календарь."""
-    if not RAILWAY_DOMAIN:
-        _reply(m, "❌ RAILWAY_DOMAIN не задан в настройках."); return
-    url = f"https://{RAILWAY_DOMAIN}/miniapp/"
+    if not PA_DOMAIN:
+        _reply(m, "❌ RAILWAY_DOMAIN не задан в переменных окружения Railway."); return
+    url = f"https://{PA_DOMAIN}/miniapp/"
     markup = telebot.types.InlineKeyboardMarkup()
     markup.add(telebot.types.InlineKeyboardButton(
         text="📊 Открыть Statham App",
@@ -2869,18 +2867,23 @@ new Chart(document.getElementById('hourChart'), {{
 
 
 @app.route("/miniapp/")
-@app.route("/miniapp/<path:filename>")
-def serve_miniapp(filename="index.html"):
-    """Отдаёт файлы Telegram Mini App."""
-    import os
+def serve_miniapp_index():
+    """Mini App — главная страница."""
     from flask import send_from_directory, abort
-    miniapp_dir = os.path.join(os.path.dirname(__file__), "miniapp")
-    if not os.path.exists(miniapp_dir):
-        abort(404)
-    # Безопасность: только html/js/css/json
-    safe = filename.replace("..", "").lstrip("/")
-    if not safe: safe = "index.html"
-    return send_from_directory(miniapp_dir, safe)
+    import os
+    d = os.path.join(os.path.dirname(os.path.abspath(__file__)), "miniapp")
+    if not os.path.exists(d): abort(404)
+    return send_from_directory(d, "index.html")
+
+@app.route("/miniapp/<path:filename>")
+def serve_miniapp_file(filename):
+    """Mini App — статические файлы."""
+    from flask import send_from_directory, abort
+    import os
+    d = os.path.join(os.path.dirname(os.path.abspath(__file__)), "miniapp")
+    safe = os.path.basename(filename)  # только имя файла, без path traversal
+    if not os.path.exists(os.path.join(d, safe)): abort(404)
+    return send_from_directory(d, safe)
 
 
 @app.route("/health")
@@ -2976,11 +2979,6 @@ def _job_weekly_top():
     except Exception as e:
         write_log(f"WEEKLY_TOP_ERR | {e}")
 
-# Инициализация планировщика
-# ══ Новые крипто-задачи (v5.0) ════════════════════════════════════════════════
-
-    except Exception as e:
-        write_log(f"CRYPTO_NEWS_ERR | {e}")
 
 
 def _job_market_summary():

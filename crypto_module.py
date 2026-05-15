@@ -30,6 +30,46 @@ COIN_ALIASES = {
 
 
 # ══ ЦЕНЫ ═══════════════════════════════════════════════════════════════════════
+# Binance символы для fallback
+_BINANCE_SYMBOLS = {
+    "bitcoin":"BTCUSDT","ethereum":"ETHUSDT","solana":"SOLUSDT",
+    "binancecoin":"BNBUSDT","ripple":"XRPUSDT","cardano":"ADAUSDT",
+    "dogecoin":"DOGEUSDT","the-open-network":"TONUSDT",
+    "avalanche-2":"AVAXUSDT","polkadot":"DOTUSDT","chainlink":"LINKUSDT",
+    "near":"NEARUSDT","arbitrum":"ARBUSDT","optimism":"OPUSDT",
+    "tron":"TRXUSDT","shiba-inu":"SHIBUSDT",
+}
+
+def _get_prices_binance(coin_ids: list) -> dict:
+    """Fallback: цены с Binance (без лимитов, без ключа)."""
+    result = {}
+    try:
+        r = requests.get("https://api.binance.com/api/v3/ticker/24hr", timeout=10)
+        if r.status_code != 200: return {}
+        tickers = {t["symbol"]: t for t in r.json()}
+        for coin_id in coin_ids:
+            sym = _BINANCE_SYMBOLS.get(coin_id)
+            if not sym: continue
+            t = tickers.get(sym)
+            if not t: continue
+            price = float(t["lastPrice"])
+            change_24h = float(t.get("priceChangePercent", 0))
+            result[coin_id] = {
+                "symbol": sym.replace("USDT",""),
+                "name": coin_id.replace("-"," ").title(),
+                "price": price,
+                "change_1h": None,
+                "change_24h": change_24h,
+                "change_7d": None,
+                "market_cap": None,
+                "volume_24h": float(t.get("quoteVolume", 0)),
+                "rank": None,
+                "_source": "binance",
+            }
+    except Exception:
+        pass
+    return result
+
 def get_prices(coins: list) -> dict:
     ids = []; alias_map = {}
     for c in coins:
@@ -41,7 +81,11 @@ def get_prices(coins: list) -> dict:
             "vs_currency": "usd", "ids": ",".join(ids),
             "price_change_percentage": "1h,24h,7d", "locale": "en"
         }, timeout=12, headers={"Accept": "application/json"})
-        if r.status_code == 429: return {"_error": "rate_limit"}
+        if r.status_code == 429:
+            # Пробуем Binance вместо CoinGecko
+            binance_data = _get_prices_binance(ids)
+            if binance_data: return binance_data
+            return {"_error": "rate_limit"}
         r.raise_for_status()
         result = {}
         for coin in r.json():
@@ -88,7 +132,7 @@ def format_price_message(coins_input: list) -> str:
             f"7д: {_fmt_pct(d.get('change_7d'))}  "
             f"#{d.get('rank','?')}"
         )
-    lines.append("\n<i>via CoinGecko (бесплатно)</i>")
+
     return "\n".join(lines)
 
 # ══ РЫНОЧНАЯ СВОДКА ════════════════════════════════════════════════════════════
@@ -120,8 +164,7 @@ def format_market_message() -> str:
         f"📊 Объём 24ч: <b>{vol_str}</b>\n"
         f"🔶 BTC доминация: <b>{(d.get('btc_dom') or 0):.1f}%</b>\n"
         f"🔷 ETH доминация: <b>{(d.get('eth_dom') or 0):.1f}%</b>\n"
-        f"🔢 Монет в листинге: {d.get('coins','?')}\n\n"
-        f"<i>via CoinGecko</i>"
+        f"🔢 Монет в листинге: {d.get('coins','?')}"
     )
 
 # ══ FEAR & GREED ════════════════════════════════════════════════════════════════
@@ -202,7 +245,7 @@ def format_fear_greed() -> str:
         f"{emoji} <b>Индекс Страха и Жадности</b> • {msk} МСК\n\n"
         f"<b>{val} / 100</b> — {ru}\n"
         f"<code>[{bar}]</code>"
-        f"{comment}\n\n"
+        f"{comment}"
     )
 
 # ══ НОВОСТИ ════════════════════════════════════════════════════════════════════
@@ -291,12 +334,105 @@ def format_news_message(news: list) -> str:
     return "\n".join(lines)
 
 
+def _translate_title(title: str) -> str:
+    """Переводит заголовок через Groq. Возвращает оригинал если не удалось."""
+    groq_key = os.environ.get("GROQ_API_KEY", "")
+    if not groq_key:
+        return title
+    # Быстрая проверка — если уже кириллица, не переводим
+    cyrillic_ratio = sum(1 for c in title if "\u0400" <= c <= "\u04ff") / max(len(title), 1)
+    if cyrillic_ratio > 0.3:
+        return title
+    try:
+        r = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {groq_key}", "Content-Type": "application/json"},
+            json={
+                "model": "llama-3.3-70b-versatile",
+                "messages": [{
+                    "role": "user",
+                    "content": (
+                        f"Переведи этот заголовок крипто-новости на русский язык. "
+                        f"Только перевод, без пояснений, без кавычек:\n{title}"
+                    )
+                }],
+                "max_tokens": 80,
+                "temperature": 0.1,
+            },
+            timeout=8,
+        )
+        if r.status_code == 200:
+            translated = r.json()["choices"][0]["message"]["content"].strip()
+            # Защита: если ответ слишком длинный или странный — оригинал
+            if len(translated) > len(title) * 3 or len(translated) < 5:
+                return title
+            return translated
+    except Exception:
+        pass
+    return title
+
+
+def _translate_titles_batch(titles: list[str]) -> list[str]:
+    """Переводит список заголовков одним запросом к Groq."""
+    groq_key = os.environ.get("GROQ_API_KEY", "")
+    if not groq_key or not titles:
+        return titles
+    # Если все уже на русском — пропускаем
+    need_translate = []
+    for i, t in enumerate(titles):
+        cyrillic = sum(1 for c in t if "\u0400" <= c <= "\u04ff") / max(len(t), 1)
+        if cyrillic < 0.3:
+            need_translate.append((i, t))
+    if not need_translate:
+        return titles
+
+    numbered = "\n".join(f"{i+1}. {t}" for i, (_, t) in enumerate(need_translate))
+    try:
+        r = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {groq_key}", "Content-Type": "application/json"},
+            json={
+                "model": "llama-3.3-70b-versatile",
+                "messages": [{
+                    "role": "user",
+                    "content": (
+                        "Переведи эти заголовки крипто-новостей на русский язык. "
+                        "Отвечай ТОЛЬКО пронумерованным списком переводов, без пояснений:\n\n"
+                        + numbered
+                    )
+                }],
+                "max_tokens": 300,
+                "temperature": 0.1,
+            },
+            timeout=12,
+        )
+        if r.status_code == 200:
+            content = r.json()["choices"][0]["message"]["content"].strip()
+            translated_lines = [l.strip() for l in content.split("\n") if l.strip()]
+            result = list(titles)
+            for j, (orig_idx, _) in enumerate(need_translate):
+                if j < len(translated_lines):
+                    # Убираем нумерацию "1. "
+                    line = translated_lines[j]
+                    line = line.lstrip("0123456789. ").strip()
+                    if line:
+                        result[orig_idx] = line
+            return result
+    except Exception:
+        pass
+    return titles
+
+
 def format_breaking_news(news: list) -> str:
     if not news: return ""
-    msk = time.strftime('%H:%M', time.gmtime(time.time() + 3*3600))
+    msk = time.strftime("%H:%M", time.gmtime(time.time() + 3*3600))
+    # Переводим все заголовки одним батч-запросом
+    titles = [n["title"] for n in news]
+    translated = _translate_titles_batch(titles)
     lines = [f"🚨 <b>ВАЖНЫЕ НОВОСТИ</b> • {msk} МСК\n"]
-    for n in news:
-        lines.append(f"• {n['title']}")
+    for i, n in enumerate(news):
+        title_ru = translated[i] if i < len(translated) else n["title"]
+        lines.append(f"• {title_ru}")
         if n.get("url"): lines.append(f"  🔗 {n['url']}")
     return "\n".join(lines)
 

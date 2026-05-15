@@ -81,7 +81,6 @@ def format_chart_message(coin_input: str, period_input: str = "7d") -> str:
         f"Закрытие: {_fmt_price(last)}  {arrow} {change:+.2f}%\n"
         f"Макс:     {_fmt_price(hi)}\n"
         f"Мин:      {_fmt_price(lo)}\n\n"
-        f"<i>via CoinGecko</i>"
     )
 
 
@@ -229,8 +228,7 @@ def format_funding_message(coin_input: str = "btc") -> str:
         f"{sentiment}\n"
         f"{risk}{next_str}\n\n"
         f"<i>Положительный = лонги платят шортам\n"
-        f"Отрицательный = шорты платят лонгам\n"
-        f"via Binance Futures</i>"
+        f"Отрицательный = шорты платят лонгам</i>"
     )
 
 
@@ -261,7 +259,7 @@ def format_tvl_message() -> str:
         for c in chains:
             tvl = c.get("tvl", 0)
             lines.append(f"  • <b>{c.get('name','?')}</b>: {fmt_tvl(tvl)}")
-        lines.append("\n<i>via DeFiLlama</i>")
+    
         return "\n".join(lines)
     except Exception:
         return "❌ Не удалось получить данные DeFiLlama."

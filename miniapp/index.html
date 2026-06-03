@@ -464,8 +464,10 @@ async function loadFearGreed() {
     <div class="fg-range"><span>Страх 0</span><span>100 Жадность</span></div>`;
 }
 
-// ── PORTFOLIO (синхронизируется с Redis через /api/portfolio) ─────────────────
-// Данные хранятся в боте — доступны и через miniapp, и через /portfolio команду
+// ── PORTFOLIO ─────────────────────────────────────────────────────────────────
+// В Telegram: данные в Redis (видны и в /portfolio боте)
+// В браузере: localStorage (только локально)
+const IS_TG = USER_ID !== 'demo';
 const COIN_ID_MAP = {
   btc:'bitcoin',eth:'ethereum',sol:'solana',bnb:'binancecoin',
   ton:'the-open-network',xrp:'ripple',ada:'cardano',doge:'dogecoin',
@@ -474,43 +476,49 @@ const COIN_ID_MAP = {
   arb:'arbitrum',op:'optimism',sui:'sui',apt:'aptos',not:'notcoin',
 };
 
+// Локальное хранилище портфеля (fallback для браузера)
+function _lsPortGet() {
+  try { return JSON.parse(localStorage.getItem('port_local') || '{}'); }
+  catch { return {}; }
+}
+function _lsPortSet(p) { localStorage.setItem('port_local', JSON.stringify(p)); }
+
 async function loadPortfolio() {
   const el = document.getElementById('port-list');
   el.innerHTML = '<div class="loader"><span class="spinner">⏳</span>Загружаем портфель...</div>';
 
-  // Загружаем из Redis через backend
   let port = {};
-  if (USER_ID !== 'demo') {
+  if (IS_TG) {
+    // В Telegram — загружаем из Redis
     const data = await backendAPI('/api/portfolio?uid=' + USER_ID);
     if (data && typeof data === 'object') port = data;
-  }
-
-  // Fallback: пробуем localStorage (старые данные)
-  if (!Object.keys(port).length) {
-    try {
-      const ls = JSON.parse(localStorage.getItem('port_' + USER_ID) || '{}');
+    // Если Redis пуст, проверяем старый localStorage
+    if (!Object.keys(port).length) {
+      const ls = _lsPortGet();
       if (Object.keys(ls).length) {
         port = ls;
-        // Мигрируем в Redis автоматически
-        if (USER_ID !== 'demo') {
-          for (const [coin, amt] of Object.entries(ls)) {
-            await backendAPI('/api/portfolio', {
-              method:'POST', headers:{'Content-Type':'application/json'},
-              body: JSON.stringify({uid:USER_ID, coin, amount:amt, action:'set'})
-            });
-          }
-          localStorage.removeItem('port_' + USER_ID);
-          toast('✅ Портфель перенесён в облако');
+        // Автоматически мигрируем в Redis
+        for (const [coin, amt] of Object.entries(ls)) {
+          await backendAPI('/api/portfolio', {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({uid:USER_ID, coin, amount:amt, action:'set'})
+          });
         }
+        _lsPortSet({});
+        toast('✅ Портфель перенесён в облако');
       }
-    } catch {}
+    }
+  } else {
+    // В браузере — localStorage
+    port = _lsPortGet();
   }
 
   const keys = Object.keys(port);
   if (!keys.length) {
     document.getElementById('port-total').textContent = '$0';
     document.getElementById('port-change').textContent = 'Портфель пуст';
-    el.innerHTML = '<div class="empty">Добавь монеты ниже 👇<br><small>Также доступно через /portfolio в боте</small></div>';
+    const hint = IS_TG ? 'Также добавляй через /portfolio в боте' : '(в браузере данные сохраняются локально)';
+    el.innerHTML = `<div class="empty">Добавь монеты ниже 👇<br><small>${hint}</small></div>`;
     return;
   }
 
@@ -544,7 +552,9 @@ async function loadPortfolio() {
       return `<div class="port-coin">
         <div class="port-coin-left">
           <div>
-            <div style="font-weight:600">${row.coin}</div>
+            <div style="font-weight:600">${row.coin}
+              <button onclick="removeCoin('${row.coin.toLowerCase()}')" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:14px;margin-left:6px">✕</button>
+            </div>
             <div class="port-coin-amount">${row.amount.toLocaleString('en',{maximumFractionDigits:8})} × ${fmtPrice(row.price)}</div>
           </div>
         </div>
@@ -566,28 +576,68 @@ async function addCoin() {
   const coin   = document.getElementById('add-coin').value.trim().toLowerCase();
   const amount = parseFloat(document.getElementById('add-amount').value);
   if (!coin || !amount || amount <= 0) { toast('Укажи монету и количество', '#f85149'); return; }
-  if (USER_ID === 'demo') { toast('Открой в Telegram!', '#f85149'); return; }
-  const res = await backendAPI('/api/portfolio', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({uid:USER_ID, coin, amount, action:'add'})
-  });
   document.getElementById('add-coin').value = '';
   document.getElementById('add-amount').value = '';
-  if (res?.ok) {
-    toast(`✅ ${coin.toUpperCase()} добавлен (видно в /portfolio)`);
-    loadPortfolio();
+
+  if (IS_TG) {
+    // В Telegram — сохраняем в Redis (бот тоже видит)
+    const res = await backendAPI('/api/portfolio', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({uid:USER_ID, coin, amount, action:'add'})
+    });
+    if (res?.ok) { toast(`✅ ${coin.toUpperCase()} добавлен`); loadPortfolio(); }
+    else { toast('❌ Ошибка сохранения', '#f85149'); }
   } else {
-    toast('❌ Ошибка сохранения', '#f85149');
+    // В браузере — localStorage
+    const p = _lsPortGet();
+    p[coin] = (parseFloat(p[coin] || 0) + amount);
+    _lsPortSet(p);
+    toast(`✅ ${coin.toUpperCase()} добавлен локально`);
+    loadPortfolio();
   }
 }
 
-// ── ALERTS (синхронизированы с Redis — бот их видит и отслеживает!) ───────────
+async function removeCoin(coin) {
+  if (IS_TG) {
+    await backendAPI('/api/portfolio', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({uid:USER_ID, coin, amount:0, action:'remove'})
+    });
+  } else {
+    const p = _lsPortGet();
+    delete p[coin];
+    _lsPortSet(p);
+  }
+  toast(`${coin.toUpperCase()} удалён`, '#6e7681');
+  loadPortfolio();
+}
+
+// ── ALERTS ────────────────────────────────────────────────────────────────────
+// В Telegram: Redis (бот мониторит и уведомляет!)
+// В браузере: localStorage (сохраняется, но бот уведомить не сможет)
+
+function _lsAlertsGet() {
+  try { return JSON.parse(localStorage.getItem('alerts_local') || '[]'); }
+  catch { return []; }
+}
+function _lsAlertsSet(a) { localStorage.setItem('alerts_local', JSON.stringify(a)); }
+
 async function loadAlerts() {
   const el = document.getElementById('alerts-list');
   el.innerHTML = '<div class="loader"><span class="spinner">⏳</span></div>';
-  const alerts = await backendAPI(`/api/alerts?uid=${USER_ID}`);
-  if (!alerts || !alerts.length) {
-    el.innerHTML = '<div class="empty">Нет алертов<br><small>Установи алерт — бот уведомит тебя в Telegram!</small></div>';
+
+  let alerts = [];
+  if (IS_TG) {
+    alerts = await backendAPI(`/api/alerts?uid=${USER_ID}`) || [];
+  } else {
+    alerts = _lsAlertsGet();
+  }
+
+  if (!alerts.length) {
+    const hint = IS_TG
+      ? 'Установи алерт — бот уведомит в Telegram!'
+      : 'В браузере алерты сохраняются локально. Для уведомлений открой в Telegram.';
+    el.innerHTML = `<div class="empty">Нет алертов<br><small>${hint}</small></div>`;
     return;
   }
   el.innerHTML = alerts.map((a, i) => `
@@ -598,7 +648,7 @@ async function loadAlerts() {
         </div>
         <div class="alert-target">${a.dir === 'above' ? 'выше' : 'ниже'} $${Number(a.target).toLocaleString('en')}</div>
       </div>
-      <button class="del-btn" onclick="delAlert('${a.coin}')">🗑</button>
+      <button class="del-btn" onclick="delAlert('${a.coin}',${i})">🗑</button>
     </div>`).join('');
 }
 
@@ -607,24 +657,41 @@ async function addAlert() {
   const dir    = document.getElementById('al-dir').value;
   const target = parseFloat(document.getElementById('al-price').value);
   if (!coin || !target || target <= 0) { toast('Заполни все поля', '#f85149'); return; }
-  if (USER_ID === 'demo') { toast('Открой в Telegram для алертов!', '#f85149'); return; }
-  const res = await backendAPI('/api/alerts', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({ uid: USER_ID, coin: coin.toLowerCase(), dir, target }),
-  });
-  if (res?.ok) {
-    document.getElementById('al-coin').value = '';
-    document.getElementById('al-price').value = '';
-    toast(`🔔 Алерт установлен — бот уведомит в Telegram!`);
-    loadAlerts();
+  document.getElementById('al-coin').value = '';
+  document.getElementById('al-price').value = '';
+
+  if (IS_TG) {
+    // В Telegram: Redis — бот отслеживает и уведомит!
+    const res = await backendAPI('/api/alerts', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ uid: USER_ID, coin: coin.toLowerCase(), dir, target }),
+    });
+    if (res?.ok) {
+      toast(`🔔 Алерт на ${coin} — бот уведомит в Telegram!`);
+      loadAlerts();
+    } else {
+      toast('❌ Ошибка сохранения', '#f85149');
+    }
   } else {
-    toast('❌ Ошибка: нужен Redis', '#f85149');
+    // В браузере: localStorage (бот не уведомит, но данные сохраняются)
+    const alerts = _lsAlertsGet();
+    alerts.push({ coin, dir, target });
+    _lsAlertsSet(alerts);
+    toast(`🔔 Алерт на ${coin} сохранён локально`);
+    loadAlerts();
   }
 }
 
-async function delAlert(coin) {
-  await backendAPI(`/api/alerts/${coin.toLowerCase()}?uid=${USER_ID}`, { method: 'DELETE' });
+async function delAlert(coin, idx) {
+  if (IS_TG) {
+    await backendAPI(`/api/alerts/${coin.toLowerCase()}?uid=${USER_ID}`, { method: 'DELETE' });
+  } else {
+    const alerts = _lsAlertsGet();
+    if (idx !== undefined) alerts.splice(idx, 1);
+    else { const i = alerts.findIndex(a => a.coin === coin); if (i >= 0) alerts.splice(i,1); }
+    _lsAlertsSet(alerts);
+  }
   toast('Алерт удалён', '#6e7681');
   loadAlerts();
 }

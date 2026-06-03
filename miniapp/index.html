@@ -243,7 +243,6 @@ const tg = window.Telegram?.WebApp;
 if (tg) {
   tg.ready();
   tg.expand();
-  // Подстраиваем цвета под тему Telegram
   if (tg.colorScheme === 'light') {
     document.documentElement.style.setProperty('--bg', '#f0f0f0');
     document.documentElement.style.setProperty('--card', '#ffffff');
@@ -253,8 +252,9 @@ if (tg) {
   }
 }
 
-const USER_ID = tg?.initDataUnsafe?.user?.id || 'demo';
-const BOT_DOMAIN = window.location.hostname; // Railway domain
+const USER_ID  = tg?.initDataUnsafe?.user?.id || 'demo';
+// Все API-запросы идут через Railway backend — обходит CORS и добавляет Binance-fallback
+const API_BASE = window.location.origin;
 
 // ── Navigation ────────────────────────────────────────────────────────────────
 function nav(pageId, btn) {
@@ -298,17 +298,17 @@ function fgColor(v) {
   return '#58a6ff';
 }
 function fgLabel(v) {
-  if (v <= 24)  return '😱 Extreme Fear';
-  if (v <= 44)  return '😨 Fear';
-  if (v <= 55)  return '😐 Neutral';
-  if (v <= 74)  return '😏 Greed';
-  return '🤑 Extreme Greed';
+  if (v <= 24)  return '😱 Паника';
+  if (v <= 44)  return '😨 Страх';
+  if (v <= 55)  return '😐 Нейтрально';
+  if (v <= 74)  return '😏 Жадность';
+  return '🤑 Экстремальная жадность';
 }
 
-// ── API calls (через Railway backend) ─────────────────────────────────────────
-async function api(path) {
+// ── Backend API helper ────────────────────────────────────────────────────────
+async function backendAPI(path, opts={}) {
   try {
-    const r = await fetch(`https://${BOT_DOMAIN}${path}`);
+    const r = await fetch(API_BASE + path, opts);
     if (!r.ok) throw new Error(r.status);
     return await r.json();
   } catch(e) {
@@ -317,76 +317,75 @@ async function api(path) {
   }
 }
 
-// ── PRICES ────────────────────────────────────────────────────────────────────
-const COINS = [
-  {id:'bitcoin',    sym:'BTC', icon:'₿'},
-  {id:'ethereum',   sym:'ETH', icon:'Ξ'},
-  {id:'solana',     sym:'SOL', icon:'◎'},
-  {id:'binancecoin',sym:'BNB', icon:'⬡'},
-  {id:'the-open-network', sym:'TON', icon:'💎'},
-];
+// ── PRICES (через Railway → CoinGecko + Binance fallback) ─────────────────────
+const COIN_ICONS = {
+  bitcoin:'₿', ethereum:'Ξ', solana:'◎', binancecoin:'⬡', 'the-open-network':'💎',
+};
 
 async function loadPrices() {
-  const ids = COINS.map(c => c.id).join(',');
-  const url = `https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids=${ids}&price_change_percentage=24h&order=market_cap_desc`;
   const el = document.getElementById('prices-list');
-  try {
-    const r = await fetch(url);
-    const data = await r.json();
-    if (!data?.length) { el.innerHTML = '<div class="empty">Нет данных</div>'; return; }
-    const map = {};
-    data.forEach(d => map[d.id] = d);
-    el.innerHTML = COINS.map(c => {
-      const d = map[c.id];
-      if (!d) return '';
-      return `<div class="coin-row">
-        <div class="coin-left">
-          <div class="coin-icon">${c.icon}</div>
-          <div><div class="coin-name">${c.sym}</div><div class="coin-rank">#${d.market_cap_rank}</div></div>
-        </div>
-        <div class="coin-right">
-          <div class="coin-price">${fmtPrice(d.current_price)}</div>
-          <div>${fmtPct(d.price_change_percentage_24h)}</div>
-        </div>
-      </div>`;
-    }).join('');
-    document.getElementById('header-sub').textContent =
-      'BTC ' + fmtPrice(map['bitcoin']?.current_price);
-  } catch(e) {
-    el.innerHTML = '<div class="empty">⚠️ Ошибка загрузки цен</div>';
+  el.innerHTML = '<div class="loader"><span class="spinner">⏳</span>Загружаем цены...</div>';
+  const data = await backendAPI('/api/prices');
+  if (!data || !data.length) {
+    el.innerHTML = '<div class="empty">⚠️ Не удалось загрузить цены</div>';
+    loadFearGreed();
+    return;
   }
+  const ORDER = ['bitcoin','ethereum','solana','binancecoin','the-open-network'];
+  data.sort((a,b) => ORDER.indexOf(a.id) - ORDER.indexOf(b.id));
+  el.innerHTML = data.map(d => {
+    const icon = COIN_ICONS[d.id] || '🪙';
+    const src  = d.source === 'binance' ? ' <span style="font-size:10px;color:var(--muted)">(Binance)</span>' : '';
+    return `<div class="coin-row">
+      <div class="coin-left">
+        <div class="coin-icon">${icon}</div>
+        <div><div class="coin-name">${d.symbol}${src}</div><div class="coin-rank">#${d.rank || '?'}</div></div>
+      </div>
+      <div class="coin-right">
+        <div class="coin-price">${fmtPrice(d.price)}</div>
+        <div>${fmtPct(d.change_24h)}</div>
+      </div>
+    </div>`;
+  }).join('');
+  const btc = data.find(d => d.id === 'bitcoin');
+  if (btc) document.getElementById('header-sub').textContent = 'BTC ' + fmtPrice(btc.price);
   loadFearGreed();
 }
 
 async function loadFearGreed() {
   const el = document.getElementById('fg-block');
-  try {
-    const r = await fetch('https://api.alternative.me/fng/?limit=1');
-    const j = await r.json();
-    const d = j.data[0];
-    const v = parseInt(d.value);
-    const color = fgColor(v);
-    const label = fgLabel(v);
-    el.innerHTML = `
-      <div class="fg-value" style="color:${color}">${v}</div>
-      <div class="fg-label">${label}</div>
-      <div class="fg-bar-wrap">
-        <div class="fg-bar" style="width:${v}%;background:${color}"></div>
-      </div>
-      <div class="fg-range"><span>Страх 0</span><span>100 Жадность</span></div>`;
-  } catch(e) {
+  const d = await backendAPI('/api/fear');
+  if (!d || !d.value) {
     el.innerHTML = '<div class="empty">⚠️ F&G недоступен</div>';
+    return;
   }
+  const v = d.value;
+  const color = fgColor(v);
+  const label = fgLabel(v);
+  el.innerHTML = `
+    <div class="fg-value" style="color:${color}">${v}</div>
+    <div class="fg-label">${label}</div>
+    <div class="fg-bar-wrap">
+      <div class="fg-bar" style="width:${v}%;background:${color}"></div>
+    </div>
+    <div class="fg-range"><span>Страх 0</span><span>100 Жадность</span></div>`;
 }
 
-// ── PORTFOLIO (localStorage для MVP) ─────────────────────────────────────────
+// ── PORTFOLIO (localStorage — данные хранятся в браузере) ─────────────────────
+// Покупочные цены для P&L: порт_buy_<uid>
 function getPortfolio() {
   try { return JSON.parse(localStorage.getItem('port_' + USER_ID) || '{}'); }
   catch { return {}; }
 }
-function savePortfolio(p) {
-  localStorage.setItem('port_' + USER_ID, JSON.stringify(p));
-}
+function savePortfolio(p) { localStorage.setItem('port_' + USER_ID, JSON.stringify(p)); }
+
+const COIN_ID_MAP = {
+  btc:'bitcoin',eth:'ethereum',sol:'solana',bnb:'binancecoin',
+  ton:'the-open-network',xrp:'ripple',ada:'cardano',doge:'dogecoin',
+  avax:'avalanche-2',dot:'polkadot',link:'chainlink',
+  shib:'shiba-inu',ltc:'litecoin',trx:'tron',near:'near',
+  arb:'arbitrum',op:'optimism',sui:'sui',apt:'aptos',
+};
 
 async function loadPortfolio() {
   const port = getPortfolio();
@@ -398,44 +397,38 @@ async function loadPortfolio() {
     el.innerHTML = '<div class="empty">Добавь монеты ниже 👇</div>';
     return;
   }
-  // Получаем цены
-  const coinIds = keys.map(k => {
-    const map = {btc:'bitcoin',eth:'ethereum',sol:'solana',bnb:'binancecoin',
-                  ton:'the-open-network',xrp:'ripple',ada:'cardano',doge:'dogecoin',
-                  avax:'avalanche-2',dot:'polkadot',link:'chainlink'};
-    return map[k] || k;
-  });
+  const coinSymbols = keys.map(k => k.toLowerCase());
   try {
-    const r = await fetch(`https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids=${coinIds.join(',')}&price_change_percentage=24h`);
-    const data = await r.json();
+    // Используем backend API — он поддерживает произвольный список монет
+    const data = await backendAPI('/api/prices?coins=' + coinSymbols.join(','));
+    if (!data || !data.length) throw new Error('no data');
     const priceMap = {};
-    data.forEach(d => priceMap[d.id] = d);
-    // Считаем
+    // Индексируем по symbol (btc, eth...) чтобы мэппить на ключи портфеля
+    data.forEach(d => {
+      priceMap[d.id] = d;
+      if (d.symbol) priceMap[d.symbol.toLowerCase()] = d;
+    });
     let total = 0, totalPrev = 0;
     const rows = keys.map(coin => {
-      const cid = coinIds[keys.indexOf(coin)];
-      const d = priceMap[cid];
+      const coinKey = coin.toLowerCase();
+      const d = priceMap[coinKey] || priceMap[COIN_ID_MAP[coinKey]];
       const amount = port[coin];
-      if (!d) return { coin, amount, value: 0, pct: 0, price: 0 };
-      const value = amount * d.current_price;
-      const pct = d.price_change_percentage_24h || 0;
-      const prevValue = value / (1 + pct/100);
-      total += value; totalPrev += prevValue;
-      return { coin: coin.toUpperCase(), amount, value, pct, price: d.current_price };
+      if (!d || !d.price) return { coin, amount, value: 0, pct: 0, price: 0 };
+      const value = amount * d.price;
+      const pct = d.change_24h || 0;
+      total += value; totalPrev += value / (1 + pct/100);
+      return { coin: coin.toUpperCase(), amount, value, pct, price: d.price };
     }).sort((a,b) => b.value - a.value);
-
     const totalChange = totalPrev > 0 ? (total - totalPrev) / totalPrev * 100 : 0;
     document.getElementById('port-total').textContent = '$' + total.toLocaleString('en', {maximumFractionDigits:2});
     document.getElementById('port-change').innerHTML = fmtPct(totalChange) + ' за 24ч';
-
-    el.innerHTML = rows.map(row => {
-      if (!row.value) return '';
+    el.innerHTML = rows.filter(r => r.value > 0).map(row => {
       const share = total > 0 ? row.value / total * 100 : 0;
       return `<div class="port-coin">
         <div class="port-coin-left">
           <div>
             <div style="font-weight:600">${row.coin}</div>
-            <div class="port-coin-amount">${row.amount.toLocaleString('en', {maximumFractionDigits:8})} × ${fmtPrice(row.price)}</div>
+            <div class="port-coin-amount">${row.amount.toLocaleString('en',{maximumFractionDigits:8})} × ${fmtPrice(row.price)}</div>
           </div>
         </div>
         <div style="text-align:right">
@@ -446,15 +439,14 @@ async function loadPortfolio() {
           </div>
         </div>
       </div>`;
-    }).join('') ||
-    '<div class="empty">Нет данных</div>';
+    }).join('') || '<div class="empty">Нет данных о ценах</div>';
   } catch {
-    el.innerHTML = '<div class="empty">⚠️ Ошибка загрузки</div>';
+    el.innerHTML = '<div class="empty">⚠️ Ошибка загрузки цен</div>';
   }
 }
 
 function addCoin() {
-  const coin = document.getElementById('add-coin').value.trim().toLowerCase();
+  const coin   = document.getElementById('add-coin').value.trim().toLowerCase();
   const amount = parseFloat(document.getElementById('add-amount').value);
   if (!coin || !amount || amount <= 0) { toast('Укажи монету и количество', '#f85149'); return; }
   const p = getPortfolio();
@@ -466,75 +458,76 @@ function addCoin() {
   loadPortfolio();
 }
 
-// ── ALERTS ────────────────────────────────────────────────────────────────────
-function getAlerts() {
-  try { return JSON.parse(localStorage.getItem('alerts_' + USER_ID) || '[]'); }
-  catch { return []; }
-}
-function saveAlerts(a) { localStorage.setItem('alerts_' + USER_ID, JSON.stringify(a)); }
-
-function loadAlerts() {
-  const alerts = getAlerts();
+// ── ALERTS (синхронизированы с Redis — бот их видит и отслеживает!) ───────────
+async function loadAlerts() {
   const el = document.getElementById('alerts-list');
-  if (!alerts.length) {
-    el.innerHTML = '<div class="empty">Нет алертов</div>'; return;
+  el.innerHTML = '<div class="loader"><span class="spinner">⏳</span></div>';
+  const alerts = await backendAPI(`/api/alerts?uid=${USER_ID}`);
+  if (!alerts || !alerts.length) {
+    el.innerHTML = '<div class="empty">Нет алертов<br><small>Установи алерт — бот уведомит тебя в Telegram!</small></div>';
+    return;
   }
   el.innerHTML = alerts.map((a, i) => `
     <div class="alert-row">
       <div>
         <div><span class="alert-dir">${a.dir === 'above' ? '📈' : '📉'}</span>
-          <span class="alert-coin"> ${a.coin}</span>
+          <span class="alert-coin"> ${String(a.coin).toUpperCase()}</span>
         </div>
         <div class="alert-target">${a.dir === 'above' ? 'выше' : 'ниже'} $${Number(a.target).toLocaleString('en')}</div>
       </div>
-      <button class="del-btn" onclick="delAlert(${i})">🗑</button>
+      <button class="del-btn" onclick="delAlert('${a.coin}')">🗑</button>
     </div>`).join('');
 }
 
-function addAlert() {
+async function addAlert() {
   const coin   = document.getElementById('al-coin').value.trim().toUpperCase();
   const dir    = document.getElementById('al-dir').value;
   const target = parseFloat(document.getElementById('al-price').value);
-  if (!coin || !target) { toast('Заполни все поля', '#f85149'); return; }
-  const alerts = getAlerts();
-  alerts.push({ coin, dir, target });
-  saveAlerts(alerts);
-  document.getElementById('al-coin').value = '';
-  document.getElementById('al-price').value = '';
-  toast(`🔔 Алерт на ${coin} установлен`);
-  loadAlerts();
+  if (!coin || !target || target <= 0) { toast('Заполни все поля', '#f85149'); return; }
+  if (USER_ID === 'demo') { toast('Открой в Telegram для алертов!', '#f85149'); return; }
+  const res = await backendAPI('/api/alerts', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ uid: USER_ID, coin: coin.toLowerCase(), dir, target }),
+  });
+  if (res?.ok) {
+    document.getElementById('al-coin').value = '';
+    document.getElementById('al-price').value = '';
+    toast(`🔔 Алерт установлен — бот уведомит в Telegram!`);
+    loadAlerts();
+  } else {
+    toast('❌ Ошибка: нужен Redis', '#f85149');
+  }
 }
 
-function delAlert(idx) {
-  const alerts = getAlerts();
-  alerts.splice(idx, 1);
-  saveAlerts(alerts);
+async function delAlert(coin) {
+  await backendAPI(`/api/alerts/${coin.toLowerCase()}?uid=${USER_ID}`, { method: 'DELETE' });
   toast('Алерт удалён', '#6e7681');
   loadAlerts();
 }
 
-// ── CALENDAR ──────────────────────────────────────────────────────────────────
-const FED_DATES = [
-  "2026-01-28","2026-03-18","2026-04-29",
-  "2026-06-17","2026-07-29","2026-09-16",
-  "2026-10-28","2026-12-09",
-];
-
-function loadCalendar() {
+// ── CALENDAR (реальные данные через Railway backend) ─────────────────────────
+async function loadCalendar() {
   const el = document.getElementById('cal-list');
+  el.innerHTML = '<div class="loader"><span class="spinner">⏳</span>Загружаем события...</div>';
+  const events = await backendAPI('/api/calendar');
+  if (!events || !events.length) {
+    el.innerHTML = '<div class="empty">⚠️ Данные временно недоступны</div>';
+    return;
+  }
   const today = new Date().toISOString().slice(0,10);
-  const upcoming = FED_DATES.filter(d => d >= today).slice(0,8);
-  if (!upcoming.length) { el.innerHTML = '<div class="empty">Нет предстоящих событий</div>'; return; }
-  el.innerHTML = upcoming.map(d => {
-    const dt = new Date(d + 'T00:00:00');
-    const label = dt.toLocaleDateString('ru', {day:'numeric', month:'long', weekday:'short'});
-    const daysLeft = Math.round((dt - new Date()) / 86400000);
-    const urgency = daysLeft <= 3 ? 'impact-high' : 'impact-medium';
-    const urgencyLabel = daysLeft <= 3 ? '🔴 Скоро' : '🟡 Запланировано';
+  el.innerHTML = events.map(e => {
+    const date  = e.date || '';
+    const daysLeft = date ? Math.round((new Date(date+'T00:00:00') - new Date()) / 86400000) : null;
+    const urgency = (daysLeft !== null && daysLeft <= 3) ? 'impact-high' : 'impact-medium';
+    const urgencyLabel = (daysLeft !== null && daysLeft <= 3) ? '🔴 Скоро' : '🟡 Запланировано';
+    const when = daysLeft !== null
+      ? `📅 ${date} · через ${daysLeft} дн.`
+      : `📅 ${date}`;
     return `<div class="event-row">
       <span class="event-impact ${urgency}">${urgencyLabel}</span>
-      <div class="event-title">🏦 Заседание ФРС — Решение по ставке</div>
-      <div class="event-when">📅 ${label} &nbsp;·&nbsp; через ${daysLeft} дн.</div>
+      <div class="event-title">${e.title || '—'}</div>
+      <div class="event-when">${when}${e.time ? ' · ' + e.time : ''}</div>
     </div>`;
   }).join('');
 }

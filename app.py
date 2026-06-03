@@ -47,6 +47,7 @@ from chart_module import (
 from portfolio_module import handle_portfolio_command
 from calendar_module import (
     format_calendar_message, check_events_today, check_events_soon, format_event_alert,
+    get_upcoming_events,
 )
 from game_module import (
     give_achievement, get_achievements, format_achievements,
@@ -2870,6 +2871,113 @@ new Chart(document.getElementById('hourChart'), {{
         return f"<pre>Error: {e}</pre>", 200, {"Content-Type": "text/html; charset=utf-8"}
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# 📱 MINIAPP BACKEND API  (проксируем внешние API через Railway)
+# ══════════════════════════════════════════════════════════════════════════════
+# Miniapp вызывает эти эндпоинты — Railway → CoinGecko/alternative.me
+# Это обходит CORS-ограничения и даёт Binance-fallback + кэш
+
+@app.route("/api/prices")
+def api_prices():
+    """Цены монет для miniapp. ?coins=btc,eth,sol или топ-5 по умолчанию."""
+    from flask import jsonify, request as freq
+    from crypto_module import get_prices, COIN_ALIASES
+    raw = freq.args.get("coins", "")
+    if raw:
+        coins = [c.strip().lower() for c in raw.split(",") if c.strip()][:10]
+    else:
+        coins = ["btc", "eth", "sol", "bnb", "ton"]
+    data = get_prices(coins)
+    if "_error" in data:
+        return jsonify({"error": data["_error"]}), 503
+    result = []
+    for coin_id, d in data.items():
+        if not isinstance(d, dict): continue
+        result.append({
+            "id": coin_id,
+            "symbol": d.get("symbol", "").upper(),
+            "name": d.get("name", ""),
+            "price": d.get("price"),
+            "change_24h": d.get("change_24h"),
+            "change_7d": d.get("change_7d"),
+            "market_cap": d.get("market_cap"),
+            "rank": d.get("rank"),
+            "source": d.get("_source", "coingecko"),
+        })
+    return jsonify(result)
+
+
+@app.route("/api/fear")
+def api_fear():
+    """Fear & Greed Index для miniapp."""
+    from flask import jsonify
+    from crypto_module import get_fear_greed
+    d = get_fear_greed()
+    if not d:
+        return jsonify({"error": "unavailable"}), 503
+    return jsonify(d)
+
+
+@app.route("/api/alerts")
+def api_alerts_get():
+    """GET /api/alerts?uid=<user_id> — алерты пользователя из Redis."""
+    from flask import jsonify, request as freq
+    uid = freq.args.get("uid", "")
+    if not uid or not str(uid).lstrip("-").isdigit():
+        return jsonify([])
+    alerts = get_user_alerts(int(uid))
+    return jsonify(alerts or [])
+
+
+@app.route("/api/alerts", methods=["POST"])
+def api_alerts_add():
+    """POST /api/alerts — добавить алерт в Redis (miniapp → бот)."""
+    from flask import jsonify, request as freq
+    try:
+        body = freq.get_json(force=True)
+        uid  = int(body.get("uid", 0))
+        coin = str(body.get("coin", "")).lower()
+        target = float(body.get("target", 0))
+        direction = str(body.get("dir", "above"))
+        if not uid or not coin or not target or direction not in ("above", "below"):
+            return jsonify({"ok": False, "error": "bad_params"}), 400
+        ok = add_price_alert(uid, coin, target, direction)
+        return jsonify({"ok": ok})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+
+@app.route("/api/alerts/<coin>", methods=["DELETE"])
+def api_alerts_del(coin):
+    """DELETE /api/alerts/<coin>?uid=<user_id> — удалить алерт из Redis."""
+    from flask import jsonify, request as freq
+    uid = freq.args.get("uid", "")
+    if not uid or not str(uid).lstrip("-").isdigit():
+        return jsonify({"ok": False}), 400
+    remove_alert(int(uid), coin.upper())
+    return jsonify({"ok": True})
+
+
+@app.route("/api/calendar")
+def api_calendar():
+    """Экономический календарь для miniapp."""
+    from flask import jsonify
+    from calendar_module import get_upcoming_events, _translate_event
+    try:
+        events = get_upcoming_events(days_ahead=30)
+        result = []
+        for e in events:
+            result.append({
+                "title":  _translate_event(e.get("title", "")),
+                "date":   e.get("date", ""),
+                "time":   e.get("time", ""),
+                "impact": e.get("impact", "medium"),
+            })
+        return jsonify(result[:20])
+    except Exception:
+        return jsonify([])
+
+
 @app.route("/miniapp/")
 def serve_miniapp_index():
     """Mini App — главная страница."""
@@ -2892,7 +3000,15 @@ def serve_miniapp_file(filename):
 
 @app.route("/health")
 def health():
-    return "OK", 200
+    from flask import jsonify
+    status = {
+        "bot": "ok",
+        "scheduler": "ok" if _scheduler.running else "fail",
+        "redis": "ok" if redis_ok() else "degraded",
+        "webhook": "ok" if _webhook_ok else "pending",
+    }
+    code = 200 if status["scheduler"] == "ok" else 503
+    return jsonify(status), code
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2968,9 +3084,13 @@ def _job_daily_report():
 def _job_weekly_top():
     """Еженедельный топ в чат — воскресенье 20:00 МСК."""
     write_log("SCHEDULER | weekly_top job triggered")
-    if not CHAT_ID: return
+    if not CHAT_ID:
+        write_log("WEEKLY_TOP_ERR | CHAT_ID не задан")
+        return
     top = get_top_users(5)
-    if not top: return
+    if not top:
+        write_log("WEEKLY_TOP_SKIP | нет активных пользователей")
+        return
     medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
     lines = ["🏆 <b>Топ недели — Statham Elite!</b>\n"]
     for i, u in enumerate(top):
@@ -2980,6 +3100,7 @@ def _job_weekly_top():
     lines.append("\nПродолжайте в том же духе! 💪")
     try:
         _send_message_simple(int(CHAT_ID), "\n".join(lines), parse_mode="HTML")
+        write_log(f"CRON_OK | weekly_top sent to {CHAT_ID}")
     except Exception as e:
         write_log(f"WEEKLY_TOP_ERR | {e}")
 
@@ -3099,6 +3220,9 @@ def _job_calendar_check():
 def _job_daily_vote():
     """Ежедневное голосование в чате в 10:00 МСК."""
     write_log("SCHEDULER | daily_vote")
+    if not CHAT_ID:
+        write_log("DAILY_VOTE_ERR | CHAT_ID не задан")
+        return
     try:
         import datetime
         question = get_daily_question()
@@ -3110,7 +3234,8 @@ def _job_daily_vote():
         ) for i, opt in enumerate(question["options"])]
         markup.add(*btns)
         text = f"📊 <b>Вопрос дня</b>\n\n{question['text']}"
-        bot.send_message(CHAT_ID, text, parse_mode="HTML", reply_markup=markup)
+        bot.send_message(int(CHAT_ID), text, parse_mode="HTML", reply_markup=markup)
+        write_log(f"CRON_OK | daily_vote sent to {CHAT_ID}")
     except Exception as e:
         write_log(f"DAILY_VOTE_ERR | {e}")
 
@@ -3122,13 +3247,13 @@ _scheduler.add_job(_job_daily_report,   "cron", hour=23, minute=50, id="daily_re
 _scheduler.add_job(_job_weekly_top,     "cron", day_of_week="sun", hour=20, minute=0, id="weekly_top")
 # 🆕 v5.0 — крипто
 _scheduler.add_job(_job_market_summary, "cron", hour="9,13,17,21", minute=0, id="market_summary")
-_scheduler.add_job(_job_check_alerts,   "interval", minutes=5, id="price_alerts")
-_scheduler.add_job(_job_resolve_predictions, "interval", hours=4, id="resolve_preds")
+_scheduler.add_job(_job_check_alerts,   "interval", minutes=5, id="price_alerts", max_instances=1)
+_scheduler.add_job(_job_resolve_predictions, "interval", hours=4, id="resolve_preds", max_instances=1)
 _scheduler.add_job(_job_calendar_check, "cron", hour="8,20", minute=0, id="calendar")
 _scheduler.add_job(_job_daily_vote,     "cron", hour=10, minute=0, id="daily_vote")
 _scheduler.start()
-write_log("SCHEDULER | APScheduler v5.0 started (morning=08:00, fact=12:00, night=23:00, "
-          "report=23:50, weekly_top=Sun 20:00, crypto_news=1h, market=4x/day, alerts=5min MSK)")
+write_log("SCHEDULER | APScheduler started (morning=08:00, fact=12:00, night=23:00, "
+          "report=23:50, weekly_top=Sun 20:00, vote=10:00, market=4x/day, alerts=5min, calendar=08,20 MSK)")
 
 # Graceful shutdown при SIGTERM (Railway останавливает контейнер через SIGTERM)
 def _handle_shutdown(sig, frame):

@@ -9,6 +9,7 @@ from typing import Optional
 
 COINGECKO_BASE  = "https://api.coingecko.com/api/v3"
 FEAR_GREED_URL  = "https://api.alternative.me/fng/"
+CRYPTOPANIC_KEY = os.environ.get("CRYPTOPANIC_KEY", "")
 
 COIN_ALIASES = {
     "btc":"bitcoin","биток":"bitcoin","биткоин":"bitcoin","bitcoin":"bitcoin",

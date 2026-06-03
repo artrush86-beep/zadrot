@@ -2502,9 +2502,13 @@ def cmd_alts(m):
     try: bot.send_chat_action(m.chat.id, "typing")
     except Exception: pass
     write_log(f"CMD /alts | uid={uid}")
-    msg = format_altseason_message()
-    write_log(f"CMD /alts OK | uid={uid} | len={len(msg)}")
-    _reply(m, msg)
+    try:
+        msg = format_altseason_message()
+        write_log(f"CMD /alts OK | uid={uid} | len={len(msg)}")
+        _reply(m, msg)
+    except Exception as e:
+        write_log(f"CMD /alts ERR | {type(e).__name__} | {e}")
+        _reply(m, "❌ Не удалось получить данные. Попробуй /market")
 
 
 @bot.message_handler(commands=["funding", "фандинг"])

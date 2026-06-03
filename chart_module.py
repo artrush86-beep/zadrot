@@ -238,57 +238,61 @@ def _get_btc_dominance_binance() -> Optional[float]:
         return None
 
 def format_altseason_message() -> str:
-    """BTC доминация — CoinGecko primary, Binance volume estimate fallback."""
-    from crypto_module import _cache_get, _cache_set
+    """BTC доминация — берёт данные из get_market_overview() (общий кэш с /market)."""
+    from crypto_module import _cache_get, _cache_set, get_market_overview
+
     cached = _cache_get("altseason")
     if cached:
         return cached
 
-    btc_dom = eth_dom = others = None
+    btc_dom: Optional[float] = None
+    eth_dom: float = 0.0
+    others:  float = 0.0
     source_note = ""
 
-    # 1. CoinGecko global (точные данные по капитализации)
+    # PRIMARY: данные из уже кэшированного get_market_overview() — тот же источник что /market
     try:
-        r = requests.get(f"{COINGECKO_BASE}/global", timeout=8)
-        if r.status_code == 200:
-            d = r.json().get("data", {})
-            pct = d.get("market_cap_percentage", {})
-            btc_dom_raw = pct.get("btc")  # None если ключ отсутствует (не 0!)
-            if btc_dom_raw:
-                btc_dom = float(btc_dom_raw)
-                eth_dom = float(pct.get("eth") or 0)
-                others  = 100 - btc_dom - eth_dom
-                source_note = "<i>Данные по капитализации: CoinGecko</i>"
+        market = get_market_overview()
+        raw = market.get("btc_dom") if market else None
+        if raw:
+            btc_dom = float(raw)
+            eth_dom = float(market.get("eth_dom") or 0)
+            others  = 100.0 - btc_dom - eth_dom
+            source_note = "<i>Данные по капитализации: CoinGecko</i>"
     except Exception:
         pass
 
-    # 2. Binance volume estimate — fallback если CoinGecko не вернул BTC доминацию
-    if btc_dom is None:
-        btc_dom = _get_btc_dominance_binance()
-        if btc_dom is not None:
-            eth_dom = 0
-            others  = 100 - btc_dom
-            source_note = "<i>⚠️ Оценка по объёму Binance (менее точно)</i>"
+    # FALLBACK: оценка по объёму торгов Binance
+    if not btc_dom:
+        try:
+            est = _get_btc_dominance_binance()
+            if est:
+                btc_dom = float(est)
+                eth_dom = 0.0
+                others  = 100.0 - btc_dom
+                source_note = "<i>⚠️ Оценка по объёму Binance (менее точно)</i>"
+        except Exception:
+            pass
 
-    if btc_dom is None:
+    if not btc_dom:
         return "❌ Не удалось получить данные доминации. Попробуй /market или /price btc"
 
-    # Определяем сезон
     if btc_dom >= 55:
-        season = "🟠 <b>БИТКОИН-СЕЗОН</b>"
+        season  = "🟠 <b>БИТКОИН-СЕЗОН</b>"
         comment = "BTC доминирует. Альткоины чаще падают относительно BTC.\nСтратегия: держать BTC, осторожно с альтами."
-        emoji = "₿"
+        emoji   = "₿"
     elif btc_dom <= 40:
-        season = "🌈 <b>АЛЬТСЕЗОН</b>"
+        season  = "🌈 <b>АЛЬТСЕЗОН</b>"
         comment = "Альткоины опережают BTC по росту.\nСтратегия: диверсификация в качественные альты."
-        emoji = "🚀"
+        emoji   = "🚀"
     else:
-        season = "⚖️ <b>ПЕРЕХОДНЫЙ ПЕРИОД</b>"
+        season  = "⚖️ <b>ПЕРЕХОДНЫЙ ПЕРИОД</b>"
         comment = "Рынок в нейтральной зоне. Возможен переход в любую сторону.\nСтратегия: наблюдение, осторожные позиции."
-        emoji = "👀"
+        emoji   = "👀"
 
-    bar_btc = "█" * round(btc_dom / 5) + "░" * (20 - round(btc_dom / 5))
-    eth_line = f"🔷 ETH: <b>{eth_dom:.1f}%</b>\n" if eth_dom else ""
+    filled  = min(20, max(0, round(btc_dom / 5)))
+    bar_btc = "█" * filled + "░" * (20 - filled)
+    eth_line    = f"🔷 ETH: <b>{eth_dom:.1f}%</b>\n" if eth_dom else ""
     others_line = f"🎰 Альты: <b>{others:.1f}%</b>\n\n" if others else "\n"
 
     result = (

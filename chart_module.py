@@ -1,6 +1,8 @@
 """
-chart_module.py — Statham Bot v6.0
-Уровень 2: ASCII-графики, Gainers/Losers, Альтсезон, Funding Rate
+chart_module.py — Statham Bot v6.1
+ASCII-графики, Gainers/Losers, Альтсезон, Funding Rate
+Primary source: Binance (free, no key, no rate limits)
+Fallback: CoinGecko (rate-limited, OHLC requires Pro key)
 """
 from __future__ import annotations
 import time, requests
@@ -17,17 +19,50 @@ _DAYS_MAP = {
     "90d": 90, "90": 90,
 }
 
+# Маппинг дней → интервал и лимит для Binance klines
+_BINANCE_INTERVAL = {
+    1:  ("1h",  24),   # 24 свечи по 1ч
+    7:  ("4h",  42),   # 42 свечи по 4ч (~7 дней)
+    30: ("1d",  30),   # 30 свечей по 1д
+    90: ("3d",  30),   # 30 свечей по 3д
+}
+
+def _get_klines_binance(symbol: str, interval: str, limit: int) -> list:
+    """Binance klines (candlestick) — без ключа, без rate-limit."""
+    try:
+        r = requests.get(f"{BINANCE_BASE}/klines",
+                         params={"symbol": symbol, "interval": interval, "limit": limit},
+                         timeout=10)
+        if r.status_code != 200:
+            return []
+        # Формат: [[openTime, open, high, low, close, volume, ...], ...]
+        return [[k[0], float(k[1]), float(k[2]), float(k[3]), float(k[4])] for k in r.json()]
+    except Exception:
+        return []
+
 def get_ohlc(coin_id: str, days: int = 7) -> list:
-    """OHLC свечи с CoinGecko."""
+    """
+    OHLC свечи. PRIMARY: Binance klines (бесплатно).
+    FALLBACK: CoinGecko (OHLC endpoint требует Pro ключ — может не работать).
+    """
+    from crypto_module import _BINANCE_SYMBOLS
+    # 1. Binance klines — основной источник
+    binance_sym = _BINANCE_SYMBOLS.get(coin_id)
+    if binance_sym:
+        interval, limit = _BINANCE_INTERVAL.get(days, ("4h", 42))
+        klines = _get_klines_binance(binance_sym, interval, limit)
+        if klines:
+            return klines
+    # 2. CoinGecko OHLC — fallback (требует Pro, может быть 403)
     try:
         r = requests.get(f"{COINGECKO_BASE}/coins/{coin_id}/ohlc",
                          params={"vs_currency": "usd", "days": days},
-                         timeout=12)
-        if r.status_code == 429: return []
-        r.raise_for_status()
-        return r.json()  # [[timestamp, open, high, low, close], ...]
+                         timeout=10)
+        if r.status_code == 200:
+            return r.json()
     except Exception:
-        return []
+        pass
+    return []
 
 def _sparkline(prices: list[float], width: int = 20, height: int = 6) -> str:
     """Строит ASCII-график из списка цен."""
@@ -85,89 +120,186 @@ def format_chart_message(coin_input: str, period_input: str = "7d") -> str:
 
 
 # ══ GAINERS / LOSERS /movers ════════════════════════════════════════════════════
+# Стейблы и деривативы — исключаем из movers
+_SKIP_SUFFIXES = {"DOWN", "UP", "BULL", "BEAR", "3L", "3S"}
+_SKIP_COINS    = {"USDT", "USDC", "BUSD", "DAI", "TUSD", "USDP", "FDUSD", "USDD", "FRAX"}
+
 def get_movers(top_n: int = 5) -> dict:
-    """Топ гейнеры и лузеры из топ-100 по капитализации."""
+    """
+    Топ гейнеры и лузеры за 24ч.
+    PRIMARY: Binance 24h ticker (все USDT пары, мин объём $10M).
+    FALLBACK: CoinGecko top-100.
+    """
+    from crypto_module import _cache_get, _cache_set
+    cached = _cache_get("movers")
+    if cached is not None:
+        return cached
+
+    # 1. Binance — primary
+    try:
+        r = requests.get(f"{BINANCE_BASE}/ticker/24hr", timeout=10)
+        if r.status_code == 200:
+            tickers = [
+                t for t in r.json()
+                if t["symbol"].endswith("USDT")
+                and float(t.get("quoteVolume", 0)) >= 10_000_000   # мин $10M объём
+                and not any(t["symbol"].startswith(s) for s in _SKIP_COINS)
+                and not any(sfx in t["symbol"] for sfx in _SKIP_SUFFIXES)
+                and float(t.get("lastPrice", 0)) > 0
+            ]
+            by_chg = sorted(tickers, key=lambda t: float(t.get("priceChangePercent", 0)))
+            result = {
+                "gainers": by_chg[-top_n:][::-1],
+                "losers":  by_chg[:top_n],
+                "_source": "binance",
+            }
+            _cache_set("movers", result, ttl=180)  # кэш 3 мин
+            return result
+    except Exception:
+        pass
+
+    # 2. CoinGecko — fallback
     try:
         r = requests.get(f"{COINGECKO_BASE}/coins/markets", params={
             "vs_currency": "usd", "order": "market_cap_desc",
-            "per_page": 100, "page": 1,
-            "price_change_percentage": "24h",
+            "per_page": 100, "page": 1, "price_change_percentage": "24h",
         }, timeout=12)
-        if r.status_code == 429: return {}
-        r.raise_for_status()
-        coins = r.json()
-        # Фильтруем стейблы
-        stables = {"tether", "usd-coin", "dai", "binance-usd", "true-usd",
-                   "first-digital-usd", "usdd", "frax", "usdp-stablecoin"}
-        coins = [c for c in coins if c["id"] not in stables]
-        by_change = sorted(coins, key=lambda c: c.get("price_change_percentage_24h") or 0)
-        losers  = by_change[:top_n]
-        gainers = by_change[-top_n:][::-1]
-        return {"gainers": gainers, "losers": losers}
+        if r.status_code == 200:
+            stables = {"tether","usd-coin","dai","binance-usd","true-usd",
+                       "first-digital-usd","usdd","frax","usdp-stablecoin"}
+            coins = [c for c in r.json() if c["id"] not in stables]
+            by_chg = sorted(coins, key=lambda c: c.get("price_change_percentage_24h") or 0)
+            result = {
+                "gainers": by_chg[-top_n:][::-1],
+                "losers":  by_chg[:top_n],
+                "_source": "coingecko",
+            }
+            _cache_set("movers", result, ttl=180)
+            return result
     except Exception:
-        return {}
+        pass
+    return {}
 
 def format_movers_message() -> str:
     data = get_movers()
     if not data:
-        return "❌ Не удалось получить данные рынка."
+        return "❌ Не удалось получить данные рынка. Попробуй через минуту."
     from crypto_module import _fmt_price
+    src = data.get("_source", "")
     msk = time.strftime("%H:%M", time.gmtime(time.time() + 3*3600))
     lines = [f"🚀 <b>Топ движения за 24ч</b> • {msk} МСК\n"]
-
     lines.append("📈 <b>Лидеры роста:</b>")
-    for c in data.get("gainers", []):
-        chg = c.get("price_change_percentage_24h") or 0
-        lines.append(f"  🟢 <b>{c['symbol'].upper()}</b> {chg:+.1f}% — {_fmt_price(c['current_price'])}")
 
-    lines.append("\n📉 <b>Лидеры падения:</b>")
-    for c in data.get("losers", []):
-        chg = c.get("price_change_percentage_24h") or 0
-        lines.append(f"  🔴 <b>{c['symbol'].upper()}</b> {chg:+.1f}% — {_fmt_price(c['current_price'])}")
-
-    lines.append("\n<i>Из топ-100 по капитализации (стейблы исключены)</i>")
+    if src == "binance":
+        for t in data.get("gainers", []):
+            sym = t["symbol"].replace("USDT", "")
+            chg = float(t.get("priceChangePercent", 0))
+            price = float(t.get("lastPrice", 0))
+            lines.append(f"  🟢 <b>{sym}</b> {chg:+.1f}% — {_fmt_price(price)}")
+        lines.append("\n📉 <b>Лидеры падения:</b>")
+        for t in data.get("losers", []):
+            sym = t["symbol"].replace("USDT", "")
+            chg = float(t.get("priceChangePercent", 0))
+            price = float(t.get("lastPrice", 0))
+            lines.append(f"  🔴 <b>{sym}</b> {chg:+.1f}% — {_fmt_price(price)}")
+        lines.append("\n<i>Binance USDT пары · объём >$10M · стейблы исключены</i>")
+    else:
+        for c in data.get("gainers", []):
+            chg = c.get("price_change_percentage_24h") or 0
+            lines.append(f"  🟢 <b>{c['symbol'].upper()}</b> {chg:+.1f}% — {_fmt_price(c['current_price'])}")
+        lines.append("\n📉 <b>Лидеры падения:</b>")
+        for c in data.get("losers", []):
+            chg = c.get("price_change_percentage_24h") or 0
+            lines.append(f"  🔴 <b>{c['symbol'].upper()}</b> {chg:+.1f}% — {_fmt_price(c['current_price'])}")
+        lines.append("\n<i>Из топ-100 по капитализации (стейблы исключены)</i>")
     return "\n".join(lines)
 
 
 # ══ АЛЬТСЕЗОН /alts ═════════════════════════════════════════════════════════════
-def format_altseason_message() -> str:
-    """BTC доминация + вывод: биткоин-сезон или альтсезон."""
+def _get_btc_dominance_binance() -> Optional[float]:
+    """Оценка BTC доминации через объём торгов Binance (приблизительно)."""
     try:
-        r = requests.get(f"{COINGECKO_BASE}/global", timeout=12)
-        r.raise_for_status()
-        d = r.json().get("data", {})
-        pct = d.get("market_cap_percentage", {})
-        btc_dom = pct.get("btc", 0)
-        eth_dom = pct.get("eth", 0)
-        others  = 100 - btc_dom - eth_dom
-
-        # Определяем сезон
-        if btc_dom >= 55:
-            season = "🟠 <b>БИТКОИН-СЕЗОН</b>"
-            comment = "BTC доминирует. Альткоины чаще падают относительно BTC.\nСтратегия: держать BTC, осторожно с альтами."
-            emoji = "₿"
-        elif btc_dom <= 40:
-            season = "🌈 <b>АЛЬТСЕЗОН</b>"
-            comment = "Альткоины опережают BTC по росту.\nСтратегия: диверсификация в качественные альты."
-            emoji = "🚀"
-        else:
-            season = "⚖️ <b>ПЕРЕХОДНЫЙ ПЕРИОД</b>"
-            comment = "Рынок в нейтральной зоне. Возможен переход в любую сторону.\nСтратегия: наблюдение, осторожные позиции."
-            emoji = "👀"
-
-        bar_btc = "█" * round(btc_dom / 5) + "░" * (20 - round(btc_dom / 5))
-
-        return (
-            f"{emoji} {season}\n\n"
-            f"🔶 BTC: <b>{btc_dom:.1f}%</b>\n"
-            f"<code>[{bar_btc}]</code>\n"
-            f"🔷 ETH: <b>{eth_dom:.1f}%</b>\n"
-            f"🎰 Альты: <b>{others:.1f}%</b>\n\n"
-            f"{comment}\n\n"
-            f"<i>BTC.D > 55% = биткоин-сезон | < 40% = альтсезон</i>"
-        )
+        from crypto_module import _cache_get, _cache_set
+        cached = _cache_get("btc_dom_est")
+        if cached is not None:
+            return cached
+        r = requests.get(f"{BINANCE_BASE}/ticker/24hr", timeout=10)
+        if r.status_code != 200:
+            return None
+        tickers = [t for t in r.json() if t["symbol"].endswith("USDT")]
+        btc_vol = float(next((t["quoteVolume"] for t in tickers if t["symbol"] == "BTCUSDT"), 0))
+        total_vol = sum(float(t["quoteVolume"]) for t in tickers)
+        if total_vol <= 0:
+            return None
+        dom = btc_vol / total_vol * 100
+        _cache_set("btc_dom_est", dom, ttl=600)
+        return dom
     except Exception:
-        return "❌ Не удалось получить данные доминации."
+        return None
+
+def format_altseason_message() -> str:
+    """BTC доминация — CoinGecko primary, Binance volume estimate fallback."""
+    from crypto_module import _cache_get, _cache_set
+    cached = _cache_get("altseason")
+    if cached:
+        return cached
+
+    btc_dom = eth_dom = others = None
+    source_note = ""
+
+    # 1. CoinGecko global (точные данные по капитализации)
+    try:
+        r = requests.get(f"{COINGECKO_BASE}/global", timeout=8)
+        if r.status_code == 200:
+            d = r.json().get("data", {})
+            pct = d.get("market_cap_percentage", {})
+            btc_dom = pct.get("btc", 0)
+            eth_dom = pct.get("eth", 0)
+            others  = 100 - btc_dom - eth_dom
+            source_note = "<i>Данные по капитализации: CoinGecko</i>"
+    except Exception:
+        pass
+
+    # 2. Binance volume estimate (менее точно, но всегда доступно)
+    if btc_dom is None:
+        btc_dom = _get_btc_dominance_binance()
+        if btc_dom is not None:
+            eth_dom = 0  # нет данных
+            others  = 100 - btc_dom
+            source_note = "<i>⚠️ Оценка по объёму Binance (менее точно)</i>"
+
+    if btc_dom is None:
+        return "❌ Не удалось получить данные доминации. Попробуй /market или /price btc"
+
+    # Определяем сезон
+    if btc_dom >= 55:
+        season = "🟠 <b>БИТКОИН-СЕЗОН</b>"
+        comment = "BTC доминирует. Альткоины чаще падают относительно BTC.\nСтратегия: держать BTC, осторожно с альтами."
+        emoji = "₿"
+    elif btc_dom <= 40:
+        season = "🌈 <b>АЛЬТСЕЗОН</b>"
+        comment = "Альткоины опережают BTC по росту.\nСтратегия: диверсификация в качественные альты."
+        emoji = "🚀"
+    else:
+        season = "⚖️ <b>ПЕРЕХОДНЫЙ ПЕРИОД</b>"
+        comment = "Рынок в нейтральной зоне. Возможен переход в любую сторону.\nСтратегия: наблюдение, осторожные позиции."
+        emoji = "👀"
+
+    bar_btc = "█" * round(btc_dom / 5) + "░" * (20 - round(btc_dom / 5))
+    eth_line = f"🔷 ETH: <b>{eth_dom:.1f}%</b>\n" if eth_dom else ""
+    others_line = f"🎰 Альты: <b>{others:.1f}%</b>\n\n" if others else "\n"
+
+    result = (
+        f"{emoji} {season}\n\n"
+        f"🔶 BTC: <b>{btc_dom:.1f}%</b>\n"
+        f"<code>[{bar_btc}]</code>\n"
+        f"{eth_line}{others_line}"
+        f"{comment}\n\n"
+        f"<i>BTC.D > 55% = биткоин-сезон | < 40% = альтсезон</i>\n"
+        f"{source_note}"
+    )
+    _cache_set("altseason", result, ttl=600)
+    return result
 
 
 # ══ FUNDING RATE /funding ═══════════════════════════════════════════════════════

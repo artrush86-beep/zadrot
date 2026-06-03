@@ -1,15 +1,38 @@
 """
-crypto_module.py — Statham Bot v5.0
+crypto_module.py — Statham Bot v6.1
 Крипто-функции: цены, Fear&Greed, новости, алерты
-Бесплатные API: CoinGecko, alternative.me, CryptoPanic, CoinDesk RSS
+Primary: Binance (no key, no rate limits)
+Fallback: CoinGecko (free tier, rate-limited)
 """
 from __future__ import annotations
-import os, re, time, requests
+import os, re, time, requests, json as _json
 from typing import Optional
 
 COINGECKO_BASE  = "https://api.coingecko.com/api/v3"
+BINANCE_BASE    = "https://api.binance.com/api/v3"
 FEAR_GREED_URL  = "https://api.alternative.me/fng/"
 CRYPTOPANIC_KEY = os.environ.get("CRYPTOPANIC_KEY", "")
+CG_API_KEY      = os.environ.get("COINGECKO_API_KEY", "")  # опционально Demo key
+
+# ══ RAM-КЭШ (in-process, сбрасывается при рестарте) ════════════════════════════
+_CACHE: dict = {}  # {key: (data, expire_ts)}
+
+def _cache_get(key: str):
+    item = _CACHE.get(key)
+    if item and time.time() < item[1]:
+        return item[0]
+    if key in _CACHE:
+        del _CACHE[key]
+    return None
+
+def _cache_set(key: str, data, ttl: int = 300):
+    _CACHE[key] = (data, time.time() + ttl)
+    # Чистим просроченные записи если кэш вырос
+    if len(_CACHE) > 50:
+        now = time.time()
+        expired = [k for k, v in list(_CACHE.items()) if now >= v[1]]
+        for k in expired:
+            _CACHE.pop(k, None)
 
 COIN_ALIASES = {
     "btc":"bitcoin","биток":"bitcoin","биткоин":"bitcoin","bitcoin":"bitcoin",
@@ -42,64 +65,125 @@ _BINANCE_SYMBOLS = {
 }
 
 def _get_prices_binance(coin_ids: list) -> dict:
-    """Fallback: цены с Binance (без лимитов, без ключа)."""
+    """PRIMARY: цены с Binance (без ключа, без rate-limit, работает всегда)."""
     result = {}
-    try:
-        r = requests.get("https://api.binance.com/api/v3/ticker/24hr", timeout=10)
-        if r.status_code != 200: return {}
-        tickers = {t["symbol"]: t for t in r.json()}
-        for coin_id in coin_ids:
-            sym = _BINANCE_SYMBOLS.get(coin_id)
-            if not sym: continue
-            t = tickers.get(sym)
-            if not t: continue
-            price = float(t["lastPrice"])
-            change_24h = float(t.get("priceChangePercent", 0))
-            result[coin_id] = {
-                "symbol": sym.replace("USDT",""),
-                "name": coin_id.replace("-"," ").title(),
-                "price": price,
-                "change_1h": None,
-                "change_24h": change_24h,
-                "change_7d": None,
-                "market_cap": None,
-                "volume_24h": float(t.get("quoteVolume", 0)),
-                "rank": None,
-                "_source": "binance",
-            }
-    except Exception:
-        pass
+    cache_key = "binance_24hr"
+    tickers_raw = _cache_get(cache_key)
+    if tickers_raw is None:
+        try:
+            r = requests.get(f"{BINANCE_BASE}/ticker/24hr", timeout=10)
+            if r.status_code != 200:
+                return {}
+            tickers_raw = r.json()
+            _cache_set(cache_key, tickers_raw, ttl=30)  # кэш 30 сек для all-tickers
+        except Exception:
+            return {}
+    tickers = {t["symbol"]: t for t in tickers_raw}
+    for coin_id in coin_ids:
+        sym = _BINANCE_SYMBOLS.get(coin_id)
+        if not sym:
+            continue
+        t = tickers.get(sym)
+        if not t:
+            continue
+        price = float(t["lastPrice"])
+        change_24h = float(t.get("priceChangePercent", 0))
+        result[coin_id] = {
+            "symbol": sym.replace("USDT", ""),
+            "name": coin_id.replace("-", " ").title(),
+            "price": price,
+            "change_1h": None,
+            "change_24h": change_24h,
+            "change_7d": None,
+            "market_cap": None,
+            "volume_24h": float(t.get("quoteVolume", 0)),
+            "rank": None,
+            "_source": "binance",
+        }
     return result
 
-def get_prices(coins: list) -> dict:
-    ids = []; alias_map = {}
-    for c in coins:
-        cg = COIN_ALIASES.get(c.lower(), c.lower())
-        ids.append(cg); alias_map[cg] = c.upper()
-    if not ids: return {}
+
+def _enrich_with_coingecko(result: dict, ids: list) -> dict:
+    """Обогащает данные Binance рангом и капитализацией из CoinGecko (необязательно)."""
     try:
+        headers = {"Accept": "application/json"}
+        if CG_API_KEY:
+            headers["x-cg-demo-api-key"] = CG_API_KEY
         r = requests.get(f"{COINGECKO_BASE}/coins/markets", params={
             "vs_currency": "usd", "ids": ",".join(ids),
-            "price_change_percentage": "1h,24h,7d", "locale": "en"
-        }, timeout=12, headers={"Accept": "application/json"})
-        if r.status_code == 429:
-            # Пробуем Binance вместо CoinGecko
-            binance_data = _get_prices_binance(ids)
-            if binance_data: return binance_data
+            "price_change_percentage": "1h,24h,7d",
+        }, timeout=6, headers=headers)
+        if r.status_code == 200:
+            for coin in r.json():
+                cid = coin["id"]
+                if cid in result:
+                    result[cid].update({
+                        "change_1h":   coin.get("price_change_percentage_1h_in_currency"),
+                        "change_7d":   coin.get("price_change_percentage_7d_in_currency"),
+                        "market_cap":  coin.get("market_cap"),
+                        "rank":        coin.get("market_cap_rank"),
+                        "_source":     "coingecko",
+                        # CoinGecko price is more accurate (more decimal places)
+                        "price":       coin.get("current_price") or result[cid]["price"],
+                        "change_24h":  coin.get("price_change_percentage_24h") or result[cid]["change_24h"],
+                    })
+    except Exception:
+        pass  # CoinGecko enrichment is optional
+    return result
+
+
+def get_prices(coins: list) -> dict:
+    """
+    Получает цены монет.
+    Порядок: RAM-cache → Binance (primary) → CoinGecko enrichment → CoinGecko direct fallback
+    """
+    ids = []
+    for c in coins:
+        ids.append(COIN_ALIASES.get(c.lower(), c.lower()))
+    if not ids:
+        return {}
+
+    # 1. Проверяем RAM-кэш (5 минут)
+    cache_key = "prices:" + ",".join(sorted(ids))
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    # 2. Binance — PRIMARY (быстро, надёжно, без ключа)
+    result = _get_prices_binance(ids)
+
+    if result:
+        # 3. CoinGecko — опциональное обогащение (rank, market_cap, 7d change)
+        _enrich_with_coingecko(result, ids)
+        _cache_set(cache_key, result, ttl=120)  # кэш 2 мин
+        return result
+
+    # 4. Если Binance недоступен (редко) — CoinGecko напрямую
+    try:
+        headers = {"Accept": "application/json"}
+        if CG_API_KEY:
+            headers["x-cg-demo-api-key"] = CG_API_KEY
+        r = requests.get(f"{COINGECKO_BASE}/coins/markets", params={
+            "vs_currency": "usd", "ids": ",".join(ids),
+            "price_change_percentage": "1h,24h,7d",
+        }, timeout=12, headers=headers)
+        if r.status_code in (401, 403, 429):
             return {"_error": "rate_limit"}
         r.raise_for_status()
-        result = {}
         for coin in r.json():
             result[coin["id"]] = {
                 "symbol": coin["symbol"].upper(), "name": coin["name"],
                 "price": coin["current_price"],
-                "change_1h": coin.get("price_change_percentage_1h_in_currency"),
+                "change_1h":  coin.get("price_change_percentage_1h_in_currency"),
                 "change_24h": coin.get("price_change_percentage_24h"),
-                "change_7d": coin.get("price_change_percentage_7d_in_currency"),
+                "change_7d":  coin.get("price_change_percentage_7d_in_currency"),
                 "market_cap": coin.get("market_cap"),
                 "volume_24h": coin.get("total_volume"),
-                "rank": coin.get("market_cap_rank"),
+                "rank":       coin.get("market_cap_rank"),
+                "_source":    "coingecko",
             }
+        if result:
+            _cache_set(cache_key, result, ttl=120)
         return result
     except Exception as e:
         return {"_error": str(e)}
@@ -138,18 +222,30 @@ def format_price_message(coins_input: list) -> str:
 
 # ══ РЫНОЧНАЯ СВОДКА ════════════════════════════════════════════════════════════
 def get_market_overview() -> dict:
+    """Обзор рынка с кэшем 10 минут. Источник: CoinGecko global."""
+    cached = _cache_get("market_overview")
+    if cached is not None:
+        return cached
     try:
-        r = requests.get(f"{COINGECKO_BASE}/global", timeout=12)
-        r.raise_for_status(); d = r.json().get("data", {})
+        headers = {}
+        if CG_API_KEY:
+            headers["x-cg-demo-api-key"] = CG_API_KEY
+        r = requests.get(f"{COINGECKO_BASE}/global", timeout=10, headers=headers)
+        r.raise_for_status()
+        d = r.json().get("data", {})
         pct = d.get("market_cap_percentage", {})
-        return {
+        result = {
             "total_cap": d.get("total_market_cap", {}).get("usd"),
             "total_vol": d.get("total_volume", {}).get("usd"),
-            "btc_dom": pct.get("btc"), "eth_dom": pct.get("eth"),
+            "btc_dom":   pct.get("btc"),
+            "eth_dom":   pct.get("eth"),
             "cap_change": d.get("market_cap_change_percentage_24h_usd"),
-            "coins": d.get("active_cryptocurrencies"),
+            "coins":     d.get("active_cryptocurrencies"),
         }
-    except Exception: return {}
+        _cache_set("market_overview", result, ttl=600)  # кэш 10 мин
+        return result
+    except Exception:
+        return {}
 
 def format_market_message() -> str:
     d = get_market_overview()
@@ -197,24 +293,28 @@ def _fg_label_by_value(v: int) -> str:
     return "Neutral"
 
 def get_fear_greed() -> dict:
-    """Пробует несколько URL — если один упал, берёт следующий."""
+    """Fear & Greed с кэшем 15 минут (alternative.me)."""
+    cached = _cache_get("fear_greed")
+    if cached is not None:
+        return cached
+
     urls = [
-        "https://api.alternative.me/fng/?limit=1",   # без params (надёжнее)
-        "https://api.alternative.me/fng/1",           # числовой путь
+        "https://api.alternative.me/fng/?limit=1",
+        "https://api.alternative.me/fng/1",
         "https://api.alternative.me/fng/?limit=1&format=json",
     ]
     for url in urls:
         try:
-            r = requests.get(url, timeout=10,
-                             headers={"User-Agent": "Mozilla/5.0"})
+            r = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
             if r.status_code != 200:
                 continue
             d = r.json()["data"][0]
             val = int(d["value"])
-            # label берём из API, но если кривой — пересчитываем сами
             raw_label = d.get("value_classification", "")
             label = raw_label if raw_label in _FG_RU else _fg_label_by_value(val)
-            return {"value": val, "label": label}
+            result = {"value": val, "label": label}
+            _cache_set("fear_greed", result, ttl=900)  # кэш 15 мин
+            return result
         except Exception:
             continue
     return {}

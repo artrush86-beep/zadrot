@@ -132,38 +132,63 @@ def _fetch_forexfactory() -> list[dict]:
     Используем scrape-friendly endpoint.
     """
     events = []
-    try:
-        # ForexFactory calendar JSON (unofficial but stable)
-        r = requests.get(
-            "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
-            timeout=10, headers={"User-Agent": "Mozilla/5.0"}
-        )
-        if r.status_code != 200:
-            return []
-        for item in r.json():
-            if item.get("country", "").upper() != "USD":
+    # Запрашиваем и текущую и следующую неделю
+    urls = [
+        "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
+        "https://nfs.faireconomy.media/ff_calendar_nextweek.json",
+    ]
+    for url in urls:
+        try:
+            r = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+            if r.status_code != 200:
                 continue
-            impact = item.get("impact", "").lower()
-            if impact not in ("high", "medium"):
-                continue
-            title    = item.get("title", "")
-            date_str = item.get("date", "")   # "01-13-2025"
-            time_str = item.get("time", "")   # "8:30am"
-            forecast = item.get("forecast", "") or ""
-            previous = item.get("previous", "") or ""
-            actual   = item.get("actual",   "") or ""
-            events.append({
-                "title":    title,
-                "date":     date_str,
-                "time":     time_str,
-                "impact":   impact,
-                "forecast": forecast,
-                "previous": previous,
-                "actual":   actual,
-                "source":   "ForexFactory",
-            })
-    except Exception:
-        pass
+            for item in r.json():
+                if item.get("country", "").upper() != "USD":
+                    continue
+                impact = item.get("impact", "").lower()
+                if impact not in ("high", "medium"):
+                    continue
+                title    = item.get("title", "")
+
+                # Нормализуем дату: "2026-05-31T08:30:00-04:00" или "05-31-2026" → "2026-05-31"
+                raw_date = item.get("date", "") or ""
+                if "T" in raw_date:
+                    # ISO 8601 со временем и таймзоной — берём только дату
+                    date_str = raw_date[:10]
+                elif len(raw_date) == 10 and raw_date[2] == "-":
+                    # "MM-DD-YYYY" → "YYYY-MM-DD"
+                    parts = raw_date.split("-")
+                    date_str = f"{parts[2]}-{parts[0]}-{parts[1]}" if len(parts) == 3 else raw_date
+                else:
+                    date_str = raw_date[:10]
+
+                # Время как строка (например "8:30am")
+                time_str = item.get("time", "") or ""
+
+                # Пропускаем события в прошлом (старше 1 дня)
+                try:
+                    from datetime import date as _date
+                    event_date = _date.fromisoformat(date_str)
+                    if event_date < _date.today():
+                        if item.get("actual"):  # показываем уже прошедшие если есть факт
+                            pass
+                        else:
+                            continue
+                except Exception:
+                    pass
+
+                events.append({
+                    "title":    title,
+                    "date":     date_str,
+                    "time":     time_str,
+                    "impact":   impact,
+                    "forecast": item.get("forecast", "") or "",
+                    "previous": item.get("previous", "") or "",
+                    "actual":   item.get("actual",   "") or "",
+                    "source":   "ForexFactory",
+                })
+        except Exception:
+            continue
     return events
 
 

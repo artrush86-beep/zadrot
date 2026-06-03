@@ -574,7 +574,15 @@ async function loadCalendar() {
   }
   el.innerHTML = events.map(e => {
     const date     = (e.date || '').slice(0, 10);
-    const daysLeft = date ? Math.round((new Date(date + 'T12:00:00') - new Date()) / 86400000) : null;
+    // Используем YYYY-MM-DD без времени — безопасно в Safari и Chrome
+    // new Date("YYYY-MM-DD") → UTC midnight → безопасно кросс-браузерно
+    let daysLeft = null;
+    if (date && date.length === 10) {
+      const [y, m, d] = date.split('-').map(Number);
+      const eventMs = Date.UTC(y, m - 1, d);
+      const todayMs = Date.UTC(new Date().getFullYear(), new Date().getMonth(), new Date().getDate());
+      daysLeft = Math.round((eventMs - todayMs) / 86400000);
+    }
     const isHigh   = e.impact === 'high';
     const urgency  = isHigh ? 'impact-high' : 'impact-medium';
     const urgencyLabel = daysLeft === 0 ? '🔴 СЕГОДНЯ'

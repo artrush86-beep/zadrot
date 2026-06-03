@@ -2680,16 +2680,26 @@ def cmd_summary(m):
 # 📱 TELEGRAM MINI APP
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _send_miniapp_button(chat_id: int):
-    """Отправляет сообщение с кнопкой miniapp."""
+def _send_miniapp_button(chat_id: int, message_thread_id: int = None):
+    """Отправляет сообщение с кнопкой miniapp. web_app для личек, URL для групп."""
     if not PA_DOMAIN:
         return False
     url = f"https://{PA_DOMAIN}/miniapp/"
     markup = telebot.types.InlineKeyboardMarkup()
-    markup.add(telebot.types.InlineKeyboardButton(
-        text="📊 Открыть Statham App",
-        web_app=telebot.types.WebAppInfo(url=url)
-    ))
+    # web_app работает только в личке (chat_id > 0); для групп используем URL-кнопку
+    if chat_id > 0:
+        markup.add(telebot.types.InlineKeyboardButton(
+            text="📊 Открыть Statham App",
+            web_app=telebot.types.WebAppInfo(url=url)
+        ))
+    else:
+        markup.add(telebot.types.InlineKeyboardButton(
+            text="📊 Открыть Statham App",
+            url=url
+        ))
+    kw = {"parse_mode": "HTML", "reply_markup": markup}
+    if message_thread_id:
+        kw["message_thread_id"] = message_thread_id
     try:
         bot.send_message(
             chat_id,
@@ -2701,8 +2711,7 @@ def _send_miniapp_button(chat_id: int):
             "• 📅 Экономический календарь (ФРС, CPI, NFP)\n"
             "• 📰 Крипто-новости\n\n"
             f"<i>Или открой прямо: {url}</i>",
-            parse_mode="HTML",
-            reply_markup=markup
+            **kw
         )
         return True
     except Exception:
@@ -2714,7 +2723,8 @@ def cmd_webapp(m):
     write_log(f"CMD /app | uid={m.from_user.id} | chat={m.chat.id}")
     if not PA_DOMAIN:
         _reply(m, "❌ RAILWAY_DOMAIN не задан в переменных окружения Railway."); return
-    if not _send_miniapp_button(m.chat.id):
+    thread_id = getattr(m, "message_thread_id", None)
+    if not _send_miniapp_button(m.chat.id, message_thread_id=thread_id):
         url = f"https://{PA_DOMAIN}/miniapp/"
         _reply(m, f"📱 <b>Statham App:</b> {url}")
 
@@ -3197,7 +3207,7 @@ def health():
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _miniapp_markup():
-    """Возвращает InlineKeyboardMarkup с кнопкой miniapp (или None если домен не задан)."""
+    """URL-кнопка miniapp для шедулер-постов в группу."""
     if not PA_DOMAIN:
         return None
     try:
@@ -3205,7 +3215,7 @@ def _miniapp_markup():
         markup = telebot.types.InlineKeyboardMarkup()
         markup.add(telebot.types.InlineKeyboardButton(
             text="📊 Открыть Statham App",
-            web_app=telebot.types.WebAppInfo(url=url)
+            url=url
         ))
         return markup
     except Exception:
@@ -3440,6 +3450,19 @@ def _job_daily_vote():
     except Exception as e:
         write_log(f"DAILY_VOTE_ERR | {e}")
 
+def _job_evening_movers():
+    """Вечерняя сводка — топ движения + DeFi TVL — 22:00 МСК."""
+    write_log("SCHEDULER | evening_movers job triggered")
+    try:
+        movers_msg = format_movers_message()
+        tvl_msg = format_tvl_message()
+        full_msg = movers_msg + "\n\n" + tvl_msg
+        markup = _miniapp_markup()
+        _send_scheduled_message(full_msg, reply_markup=markup)
+    except Exception as e:
+        write_log(f"EVENING_MOVERS_ERR | {e}")
+
+
 _scheduler = BackgroundScheduler(timezone="Europe/Moscow", daemon=True)
 _scheduler.add_job(_job_morning,        "cron", hour=8,  minute=0,  id="morning")
 _scheduler.add_job(_job_factofday,      "cron", hour=12, minute=0,  id="factofday")
@@ -3452,9 +3475,11 @@ _scheduler.add_job(_job_check_alerts,   "interval", minutes=5, id="price_alerts"
 _scheduler.add_job(_job_resolve_predictions, "interval", hours=4, id="resolve_preds", max_instances=1)
 _scheduler.add_job(_job_calendar_check, "cron", hour="8,20", minute=0, id="calendar")
 _scheduler.add_job(_job_daily_vote,     "cron", hour=10, minute=0, id="daily_vote")
+_scheduler.add_job(_job_evening_movers, "cron", hour=22, minute=0, id="evening_movers")
 _scheduler.start()
 write_log("SCHEDULER | APScheduler started (morning=08:00, fact=12:00, night=23:00, "
-          "report=23:50, weekly_top=Sun 20:00, vote=10:00, market=4x/day, alerts=5min, calendar=08,20 MSK)")
+          "report=23:50, weekly_top=Sun 20:00, vote=10:00, market=4x/day, alerts=5min, "
+          "movers=22:00, calendar=08,20 MSK)")
 
 # Graceful shutdown при SIGTERM (Railway останавливает контейнер через SIGTERM)
 def _handle_shutdown(sig, frame):
@@ -3493,7 +3518,7 @@ DAILY_FACTS = [
     "🎯 Факт дня: Слоны — единственные животные, которые не умеют прыгать! 🐘",
 ]
 
-def _send_scheduled_message(text: str, photo_path: str = None):
+def _send_scheduled_message(text: str, photo_path: str = None, reply_markup=None):
     """Отправляет сообщение в чат (используется cron)."""
     if not CHAT_ID:
         write_log("CRON_ERR | CHAT_ID не задан")
@@ -3506,7 +3531,10 @@ def _send_scheduled_message(text: str, photo_path: str = None):
             with open(photo_path, "rb") as p:
                 bot.send_photo(chat_id, p, caption=text, parse_mode="HTML")
         else:
-            _send_message_simple(chat_id, text, parse_mode="HTML")
+            kw = {"parse_mode": "HTML"}
+            if reply_markup:
+                kw["reply_markup"] = reply_markup
+            _send_message_simple(chat_id, text, **kw)
 
         write_log(f"CRON_OK | sent to {chat_id}")
         return "OK", 200

@@ -253,18 +253,20 @@ def format_altseason_message() -> str:
         if r.status_code == 200:
             d = r.json().get("data", {})
             pct = d.get("market_cap_percentage", {})
-            btc_dom = pct.get("btc", 0)
-            eth_dom = pct.get("eth", 0)
-            others  = 100 - btc_dom - eth_dom
-            source_note = "<i>Данные по капитализации: CoinGecko</i>"
+            btc_dom_raw = pct.get("btc")  # None если ключ отсутствует (не 0!)
+            if btc_dom_raw:
+                btc_dom = float(btc_dom_raw)
+                eth_dom = float(pct.get("eth") or 0)
+                others  = 100 - btc_dom - eth_dom
+                source_note = "<i>Данные по капитализации: CoinGecko</i>"
     except Exception:
         pass
 
-    # 2. Binance volume estimate (менее точно, но всегда доступно)
+    # 2. Binance volume estimate — fallback если CoinGecko не вернул BTC доминацию
     if btc_dom is None:
         btc_dom = _get_btc_dominance_binance()
         if btc_dom is not None:
-            eth_dom = 0  # нет данных
+            eth_dom = 0
             others  = 100 - btc_dom
             source_note = "<i>⚠️ Оценка по объёму Binance (менее точно)</i>"
 

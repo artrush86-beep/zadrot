@@ -1136,7 +1136,7 @@ def get_bot_answer(text: str, name: str, use_ai: bool = True,
         else:
             history = None
         # Добавляем глобальный контекст чата + память пользователя
-        global_ctx = get_global_ctx(limit=8)
+        global_ctx = get_global_ctx(limit=20)
         user_mem   = get_user_memory_str(user_id) if user_id else ""
         context_parts = [c for c in [global_ctx, user_mem] if c]
         context = "\n\n".join(context_parts)
@@ -1845,6 +1845,8 @@ def cmd_ai(m):
     if any(kw in question.lower() for kw in ["btc","eth","биток","крипта","bitcoin","crypto","цена","рынок"]):
         crypto_ctx = get_crypto_ai_context()
         if crypto_ctx: ctx_parts.append(crypto_ctx)
+    global_ctx = get_global_ctx(limit=15)
+    if global_ctx: ctx_parts.append(global_ctx)
     user_mem = get_user_memory_str(uid)
     if user_mem: ctx_parts.append(user_mem)
     context = "\n".join(ctx_parts)
@@ -2162,7 +2164,7 @@ def handle_message(message):
     if should_random_reply() and (ai.api_key or gemini.enabled):
         uid_r = user.id
         history = get_chat_history_r(uid_r, limit=5) or get_chat_history(uid_r, limit=5)
-        global_ctx = get_global_ctx(limit=5)
+        global_ctx = get_global_ctx(limit=15)
         ai_response = ask_ai(message.text[:200], user.first_name,
                              context="Случайный ответ в чате\n" + global_ctx,
                              history=history, user_id=uid_r)
@@ -3230,6 +3232,20 @@ def _job_morning():
         if ai_greeting:
             text = ai_greeting
     _send_scheduled_message(text, MORNING_PHOTO_PATH)
+    # Рынок после приветствия
+    try:
+        market_msg = format_market_message()
+        markup = _miniapp_markup()
+        _send_scheduled_message(market_msg, reply_markup=markup)
+    except Exception as e:
+        write_log(f"MORNING_MARKET_ERR | {e}")
+    # Ближайшие события на 3 дня
+    try:
+        cal_msg = format_calendar_message(days_ahead=3)
+        if cal_msg and "Нет " not in cal_msg[:30]:
+            _send_scheduled_message(cal_msg)
+    except Exception as e:
+        write_log(f"MORNING_CAL_ERR | {e}")
 
 def _job_night():
     """Ночной пост — 23:00 МСК."""
@@ -3450,15 +3466,46 @@ def _job_daily_vote():
     except Exception as e:
         write_log(f"DAILY_VOTE_ERR | {e}")
 
+def _job_daytime_engage():
+    """Дневной вопрос от AI — 15:00 МСК. Только если AI активен и чат не бурлит."""
+    write_log("SCHEDULER | daytime_engage triggered")
+    if not (ai.api_key or gemini.enabled) or not CHAT_ID:
+        return
+    try:
+        # Если в последних 15 сообщениях чата много активности — не мешаем
+        global_ctx = get_global_ctx(limit=15)
+        if global_ctx and global_ctx.count("\n") >= 12:
+            write_log("SCHEDULER | daytime_engage skipped — chat is active")
+            return
+        crypto_ctx = get_crypto_ai_context()
+        prompt = (
+            "Придумай ОДИН короткий вопрос или тему для обсуждения в крипто-чате. "
+            "Опирайся на текущий рынок. Формат: 1-2 предложения + смайлы. "
+            "Заверши вопросом чтобы участники ответили. "
+            f"Контекст: {crypto_ctx}"
+        )
+        question = ask_ai(prompt, "", context=crypto_ctx)
+        if question:
+            markup = _miniapp_markup()
+            _send_scheduled_message(f"💬 <b>Тема дня</b>\n\n{question}", reply_markup=markup)
+            write_log("SCHEDULER | daytime_engage sent")
+    except Exception as e:
+        write_log(f"DAYTIME_ENGAGE_ERR | {e}")
+
+
 def _job_evening_movers():
-    """Вечерняя сводка — топ движения + DeFi TVL — 22:00 МСК."""
+    """Вечерняя сводка — рынок + топ движения + DeFi TVL — 22:00 МСК."""
     write_log("SCHEDULER | evening_movers job triggered")
+    markup = _miniapp_markup()
+    try:
+        market_msg = format_market_message()
+        _send_scheduled_message(market_msg, reply_markup=markup)
+    except Exception as e:
+        write_log(f"EVENING_MARKET_ERR | {e}")
     try:
         movers_msg = format_movers_message()
         tvl_msg = format_tvl_message()
-        full_msg = movers_msg + "\n\n" + tvl_msg
-        markup = _miniapp_markup()
-        _send_scheduled_message(full_msg, reply_markup=markup)
+        _send_scheduled_message(movers_msg + "\n\n" + tvl_msg)
     except Exception as e:
         write_log(f"EVENING_MOVERS_ERR | {e}")
 
@@ -3476,10 +3523,11 @@ _scheduler.add_job(_job_resolve_predictions, "interval", hours=4, id="resolve_pr
 _scheduler.add_job(_job_calendar_check, "cron", hour="8,20", minute=0, id="calendar")
 _scheduler.add_job(_job_daily_vote,     "cron", hour=10, minute=0, id="daily_vote")
 _scheduler.add_job(_job_evening_movers, "cron", hour=22, minute=0, id="evening_movers")
+_scheduler.add_job(_job_daytime_engage, "cron", hour=15, minute=0, id="daytime_engage")
 _scheduler.start()
 write_log("SCHEDULER | APScheduler started (morning=08:00, fact=12:00, night=23:00, "
           "report=23:50, weekly_top=Sun 20:00, vote=10:00, market=4x/day, alerts=5min, "
-          "movers=22:00, calendar=08,20 MSK)")
+          "movers+market=22:00, engage=15:00, calendar=08,20 MSK)")
 
 # Graceful shutdown при SIGTERM (Railway останавливает контейнер через SIGTERM)
 def _handle_shutdown(sig, frame):

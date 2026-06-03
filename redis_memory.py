@@ -248,6 +248,42 @@ def check_rate_limit(uid, cmd, max_calls=5, window=60):
         return n <= max_calls
     except Exception: return True
 
+# ══ 9. ТЕМА ЧАТА (2ч памяти) ═══════════════════════════════════════════════════
+def get_chat_topic() -> str:
+    r = _get()
+    if not r: return ""
+    try: return r.get("chat_topic") or ""
+    except Exception: return ""
+
+def set_chat_topic(topic: str):
+    r = _get()
+    if not r: return
+    try: r.setex("chat_topic", 7200, topic[:50])
+    except Exception: pass
+
+def update_topic_keyword(word: str) -> int:
+    """Счётчик упоминаний слова за 2ч. Возвращает текущее кол-во."""
+    r = _get()
+    if not r: return 0
+    try:
+        key = f"kw:{word.lower()[:20]}"
+        n = int(r.incr(key))
+        if n == 1: r.expire(key, 7200)
+        return n
+    except Exception: return 0
+
+# ══ 10. СЧЁТЧИК СООБЩЕНИЙ ПОЛЬЗОВАТЕЛЯ (для обновления профиля) ════════════════
+def incr_user_msg_count(uid: int) -> int:
+    """Быстрый Redis-счётчик сообщений пользователя (30 дней TTL)."""
+    r = _get()
+    if not r: return 0
+    key = f"umsg:{uid}"
+    try:
+        n = int(r.incr(key))
+        if n == 1: r.expire(key, 30 * 86400)
+        return n
+    except Exception: return 0
+
 # ══ ДИАГНОСТИКА ════════════════════════════════════════════════════════════════
 def redis_stats():
     r = _get()

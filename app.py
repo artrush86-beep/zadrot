@@ -35,6 +35,7 @@ from redis_memory import (
     save_user_memory, get_user_memory, get_user_memory_str, delete_user_memory,
     set_crypto_prices, get_crypto_prices,
     add_price_alert, get_all_alerts, remove_alert, get_user_alerts, check_rate_limit,
+    get_chat_topic, set_chat_topic, update_topic_keyword, incr_user_msg_count,
 )
 from crypto_module import (
     format_price_message, format_market_message, format_fear_greed,
@@ -1138,7 +1139,10 @@ def get_bot_answer(text: str, name: str, use_ai: bool = True,
         # Добавляем глобальный контекст чата + память пользователя
         global_ctx = get_global_ctx(limit=20)
         user_mem   = get_user_memory_str(user_id) if user_id else ""
+        topic      = get_chat_topic()
         context_parts = [c for c in [global_ctx, user_mem] if c]
+        if topic:
+            context_parts.insert(0, f"Сейчас в чате активно обсуждают: {topic}")
         context = "\n\n".join(context_parts)
         ai_response = ask_ai(text, name, context=context, history=history, user_id=user_id)
         if ai_response:
@@ -1262,6 +1266,31 @@ RANDOM_REACTIONS = {
         "🎲 {name}, рынок любит неожиданности. /fear покажет настроение толпы!",
     ],
 }
+
+# ── Ключевые слова для определения активной темы в чате ──────────────────────
+_TOPIC_TRIGGERS: dict[str, str] = {
+    "bitcoin": "Bitcoin", "биткоин": "Bitcoin", "btc": "Bitcoin", "биток": "Bitcoin",
+    "ethereum": "Ethereum", "эфир": "Ethereum", "eth": "Ethereum",
+    "solana": "Solana", "солана": "Solana",
+    "defi": "DeFi", "дефи": "DeFi",
+    "nft": "NFT",
+    "шорт": "шортах", "шорты": "шортах", "лонг": "лонгах", "лонги": "лонгах",
+    "фрс": "ФРС и ставках", "ставка": "ставках", "пауэлл": "ФРС",
+    "памп": "движениях рынка", "дамп": "движениях рынка",
+    "альтсезон": "альтсезоне", "альты": "альткоинах",
+    "листинг": "листингах", "ton": "TON", "тон": "TON",
+    "xrp": "XRP", "рипл": "XRP",
+}
+
+def _detect_topic(text: str):
+    """Отслеживает повторяющиеся темы. После 5 упоминаний — сохраняет в Redis на 2ч."""
+    t = text.lower()
+    for kw, topic in _TOPIC_TRIGGERS.items():
+        if kw in t:
+            count = update_topic_keyword(kw)
+            if count >= 5:
+                set_chat_topic(topic)
+            break
 
 def check_random_reactions(text: str, name: str) -> str | None:
     """Проверяет текст на случайные реакции."""
@@ -2105,6 +2134,26 @@ def handle_ai_prefix(m):
             write_log(f"AI_PREFIX_FAIL_ERR | {type(e).__name__}")
 
 
+def _update_user_interests(uid: int, name: str):
+    """Фоновое обновление профиля интересов пользователя через AI (каждые 10 сообщений)."""
+    try:
+        history = get_chat_history_r(uid, limit=10) or get_chat_history(uid, limit=10)
+        if not history or len(history) < 3:
+            return
+        msgs = "\n".join(f"- {h['user_msg'][:80]}" for h in history[-10:])
+        prompt = (
+            f"Определи 2-3 ключевых интереса пользователя {name} по его сообщениям. "
+            "Одна строка, максимум 80 символов. Пример: 'трейдер, держит BTC/SOL, интересуется DeFi'. "
+            f"Сообщения:\n{msgs}"
+        )
+        summary = ask_ai(prompt, "")
+        if summary and 5 < len(summary) < 120:
+            save_user_memory(uid, "interests", summary.strip()[:100])
+            write_log(f"USER_PROFILE | uid={uid} | {summary[:50]}")
+    except Exception as e:
+        write_log(f"USER_PROFILE_ERR | {uid} | {e}")
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # ГЛАВНЫЙ ОБРАБОТЧИК СООБЩЕНИЙ
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2117,9 +2166,14 @@ def handle_message(message):
     user = message.from_user
     record_user(user)
 
-    # ── Redis: добавляем в глобальный контекст чата ───────────────────────────
+    # ── Redis: контекст чата + тема + профиль пользователя ───────────────────
     if message.text:
         add_global_ctx(user.first_name or "User", message.text)
+        _detect_topic(message.text)
+    msg_count = incr_user_msg_count(user.id)
+    if msg_count % 10 == 0 and (ai.api_key or gemini.enabled):
+        threading.Thread(target=_update_user_interests,
+                         args=(user.id, user.first_name), daemon=True).start()
 
     admin = is_admin(message.chat.id, user.id)
     t     = message.text.lower().strip()
@@ -3232,7 +3286,21 @@ def _job_morning():
         if ai_greeting:
             text = ai_greeting
     _send_scheduled_message(text, MORNING_PHOTO_PATH)
-    # Рынок после приветствия
+    # AI-брифинг по рынку
+    try:
+        if ai.api_key or gemini.enabled:
+            crypto_ctx = get_crypto_ai_context()
+            briefing = ask_ai(
+                "Напиши краткий утренний крипто-брифинг для чата (3 предложения). "
+                "Упомяни состояние BTC, индекс страха/жадности и главный тренд. "
+                "Стиль: аналитик-практик, лаконично, с эмодзи.",
+                "", context=crypto_ctx
+            )
+            if briefing:
+                _send_scheduled_message(f"📋 <b>Утренний брифинг</b>\n\n{briefing}")
+    except Exception as e:
+        write_log(f"MORNING_BRIEFING_ERR | {e}")
+    # Рынок + кнопка приложения
     try:
         market_msg = format_market_message()
         markup = _miniapp_markup()
@@ -3517,7 +3585,7 @@ _scheduler.add_job(_job_night,          "cron", hour=23, minute=0,  id="night")
 _scheduler.add_job(_job_daily_report,   "cron", hour=23, minute=50, id="daily_report")
 _scheduler.add_job(_job_weekly_top,     "cron", day_of_week="sun", hour=20, minute=0, id="weekly_top")
 # 🆕 v5.0 — крипто
-_scheduler.add_job(_job_market_summary, "cron", hour="9,13,17,21", minute=0, id="market_summary")
+_scheduler.add_job(_job_market_summary, "cron", hour="7,9,13,17,21", minute=0, id="market_summary")
 _scheduler.add_job(_job_check_alerts,   "interval", minutes=5, id="price_alerts", max_instances=1)
 _scheduler.add_job(_job_resolve_predictions, "interval", hours=4, id="resolve_preds", max_instances=1)
 _scheduler.add_job(_job_calendar_check, "cron", hour="8,20", minute=0, id="calendar")
@@ -3526,7 +3594,7 @@ _scheduler.add_job(_job_evening_movers, "cron", hour=22, minute=0, id="evening_m
 _scheduler.add_job(_job_daytime_engage, "cron", hour=15, minute=0, id="daytime_engage")
 _scheduler.start()
 write_log("SCHEDULER | APScheduler started (morning=08:00, fact=12:00, night=23:00, "
-          "report=23:50, weekly_top=Sun 20:00, vote=10:00, market=4x/day, alerts=5min, "
+          "report=23:50, weekly_top=Sun 20:00, vote=10:00, market=07,09,13,17,21, alerts=5min, "
           "movers+market=22:00, engage=15:00, calendar=08,20 MSK)")
 
 # Graceful shutdown при SIGTERM (Railway останавливает контейнер через SIGTERM)

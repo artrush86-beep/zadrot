@@ -146,6 +146,42 @@
       opacity: 0; transition: opacity .3s;
     }
     .toast.show { opacity: 1; }
+    /* ── PERIOD FILTER TABS ────────────────────────────────────────── */
+    .period-tabs {
+      display: flex; gap: 6px; margin-bottom: 12px; overflow-x: auto;
+      scrollbar-width: none; -webkit-overflow-scrolling: touch;
+    }
+    .period-tabs::-webkit-scrollbar { display: none; }
+    .ptab {
+      flex-shrink: 0; padding: 5px 12px; border-radius: 16px;
+      background: var(--bg); border: 1px solid var(--border);
+      color: var(--muted); font-size: 12px; cursor: pointer;
+      white-space: nowrap; transition: all .15s;
+    }
+    .ptab.active { background: var(--blue); border-color: var(--blue); color: #fff; }
+    /* ── TOP-50 TABLE ───────────────────────────────────────────────── */
+    .top50-row {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 13px;
+    }
+    .top50-row:last-child { border-bottom: none; }
+    .top50-rank { color: var(--muted); width: 22px; flex-shrink: 0; }
+    .top50-sym { font-weight: 700; flex: 1; }
+    .top50-vol { color: var(--muted); font-size: 11px; }
+    .show-more-btn {
+      width: 100%; padding: 10px; border-radius: 8px; margin-top: 8px;
+      background: var(--bg); border: 1px solid var(--border);
+      color: var(--blue); font-size: 13px; cursor: pointer;
+    }
+    /* ── SEARCH BAR ─────────────────────────────────────────────────── */
+    .search-bar {
+      display: flex; gap: 8px; margin-bottom: 10px;
+    }
+    .search-inp {
+      flex: 1; background: var(--bg); border: 1px solid var(--border);
+      border-radius: 8px; padding: 8px 12px; color: var(--text); font-size: 13px;
+    }
+    .search-inp:focus { outline: none; border-color: var(--blue); }
     /* ── CALENDAR ENHANCED ──────────────────────────────────────────── */
     .event-meta { display: flex; gap: 10px; font-size: 12px; margin-top: 4px; flex-wrap: wrap; }
     .event-val { background: var(--bg); border-radius: 4px; padding: 2px 7px; }
@@ -185,6 +221,22 @@
   <div class="card">
     <div class="card-title">😱 Fear & Greed Index</div>
     <div id="fg-block"><div class="loader"><span class="spinner">⏳</span></div></div>
+  </div>
+  <div class="card">
+    <div class="card-title" style="display:flex;justify-content:space-between;align-items:center">
+      <span>🏆 Топ-50 по объёму</span>
+      <span id="top50-upd" style="font-size:11px;color:var(--muted)"></span>
+    </div>
+    <div class="search-bar">
+      <input class="search-inp" id="top50-search" placeholder="🔍 Поиск монеты..." oninput="filterTop50()">
+    </div>
+    <div class="period-tabs" id="top50-sort-tabs">
+      <button class="ptab active" onclick="sortTop50('vol',this)">📊 Объём</button>
+      <button class="ptab" onclick="sortTop50('chg_desc',this)">🟢 Рост</button>
+      <button class="ptab" onclick="sortTop50('chg_asc',this)">🔴 Падение</button>
+      <button class="ptab" onclick="sortTop50('price',this)">💰 Цена</button>
+    </div>
+    <div id="top50-list"><div class="loader"><span class="spinner">⏳</span>Загружаем топ-50...</div></div>
   </div>
 </div>
 
@@ -230,6 +282,13 @@
 <div class="page" id="page-cal">
   <div class="card">
     <div class="card-title">📅 Экономический календарь</div>
+    <div class="period-tabs" id="cal-period-tabs">
+      <button class="ptab active" onclick="filterCal('week',this)">📅 Эта неделя</button>
+      <button class="ptab" onclick="filterCal('today',this)">🔴 Сегодня</button>
+      <button class="ptab" onclick="filterCal('tomorrow',this)">🟡 Завтра</button>
+      <button class="ptab" onclick="filterCal('month',this)">📆 Месяц</button>
+      <button class="ptab" onclick="filterCal('all',this)">🌍 Все</button>
+    </div>
     <div id="cal-list"><div class="loader"><span class="spinner">⏳</span>Загружаем события...</div></div>
   </div>
 </div>
@@ -238,6 +297,13 @@
 <div class="page" id="page-news">
   <div class="card">
     <div class="card-title">📰 Крипто-новости</div>
+    <div class="period-tabs" id="news-period-tabs">
+      <button class="ptab active" onclick="filterNews('all',this)">📰 Все</button>
+      <button class="ptab" onclick="filterNews('3h',this)">⚡ 3 часа</button>
+      <button class="ptab" onclick="filterNews('today',this)">📅 Сегодня</button>
+      <button class="ptab" onclick="filterNews('ru',this)">🇷🇺 RU</button>
+      <button class="ptab" onclick="filterNews('en',this)">🇬🇧 EN</button>
+    </div>
     <div id="news-list"><div class="loader"><span class="spinner">⏳</span>Загружаем новости...</div></div>
   </div>
 </div>
@@ -563,89 +629,223 @@ async function delAlert(coin) {
   loadAlerts();
 }
 
-// ── CALENDAR (расширенный — с прогнозом, фактом и крипто-импактом) ───────────
-async function loadCalendar() {
+// ── CALENDAR (фильтрация по периодам) ────────────────────────────────────────
+let _calEvents = [];
+let _calFilter = 'week';
+
+function _daysLeft(dateStr) {
+  if (!dateStr || dateStr.length < 10) return null;
+  const [y, m, d] = dateStr.slice(0,10).split('-').map(Number);
+  const eventMs = Date.UTC(y, m - 1, d);
+  const todayMs = Date.UTC(new Date().getFullYear(), new Date().getMonth(), new Date().getDate());
+  return Math.round((eventMs - todayMs) / 86400000);
+}
+
+function _renderCalEvents(events) {
   const el = document.getElementById('cal-list');
-  el.innerHTML = '<div class="loader"><span class="spinner">⏳</span>Загружаем события...</div>';
-  const events = await backendAPI('/api/calendar');
-  if (!events || !events.length) {
-    el.innerHTML = '<div class="empty">⚠️ Данные временно недоступны<br><small>Попробуй позже</small></div>';
+  if (!events.length) {
+    el.innerHTML = '<div class="empty">Нет событий за этот период</div>';
     return;
   }
   el.innerHTML = events.map(e => {
     const date     = (e.date || '').slice(0, 10);
-    // Используем YYYY-MM-DD без времени — безопасно в Safari и Chrome
-    // new Date("YYYY-MM-DD") → UTC midnight → безопасно кросс-браузерно
-    let daysLeft = null;
-    if (date && date.length === 10) {
-      const [y, m, d] = date.split('-').map(Number);
-      const eventMs = Date.UTC(y, m - 1, d);
-      const todayMs = Date.UTC(new Date().getFullYear(), new Date().getMonth(), new Date().getDate());
-      daysLeft = Math.round((eventMs - todayMs) / 86400000);
-    }
+    const dl       = _daysLeft(date);
     const isHigh   = e.impact === 'high';
     const urgency  = isHigh ? 'impact-high' : 'impact-medium';
-    const urgencyLabel = daysLeft === 0 ? '🔴 СЕГОДНЯ'
-                       : daysLeft === 1 ? '🔴 ЗАВТРА'
-                       : daysLeft <= 3  ? '🟠 Скоро'
-                       : isHigh         ? '🔴 Высокая важность'
-                       :                  '🟡 Средняя важность';
-
-    // Строка с датой и временем
+    const urgencyLabel = dl === 0 ? '🔴 СЕГОДНЯ'
+                       : dl === 1 ? '🟠 ЗАВТРА'
+                       : dl !== null && dl <= 3 ? '🟠 Скоро'
+                       : isHigh ? '🔴 Важно' : '🟡 Запланировано';
     const whenParts = [];
     if (date) whenParts.push('📅 ' + date);
     if (e.time) whenParts.push(e.time);
-    if (daysLeft !== null && daysLeft >= 0) whenParts.push(`через ${daysLeft} дн.`);
+    if (dl !== null && dl >= 0) whenParts.push(`через ${dl} дн.`);
+    else if (dl !== null && dl < 0) whenParts.push('прошло');
     const when = whenParts.join(' · ');
 
-    // Прогноз / предыдущее / факт
     let metaHtml = '';
     if (e.forecast || e.previous || e.actual) {
       const parts = [];
       if (e.forecast) parts.push(`<div class="event-val"><span>Прогноз: </span>${e.forecast}</div>`);
       if (e.previous) parts.push(`<div class="event-val"><span>Пред.: </span>${e.previous}</div>`);
       if (e.actual) {
-        const cls = e.actual > e.forecast ? 'event-actual-pos' : 'event-actual-neg';
+        const cls = parseFloat(e.actual) >= parseFloat(e.forecast||'0') ? 'event-actual-pos' : 'event-actual-neg';
         parts.push(`<div class="event-val"><span>Факт: </span><span class="${cls}">${e.actual}</span></div>`);
       }
       if (parts.length) metaHtml = `<div class="event-meta">${parts.join('')}</div>`;
     }
-
-    // Описание влияния на крипту
-    const impactHtml = e.crypto_impact
-      ? `<div class="event-impact-text">${e.crypto_impact}</div>` : '';
+    const impactHtml = e.crypto_impact ? `<div class="event-impact-text">${e.crypto_impact}</div>` : '';
 
     return `<div class="event-row">
       <span class="event-impact ${urgency}">${urgencyLabel}</span>
-      <div class="event-title">${e.title || e.title_en || '—'}</div>
+      <div class="event-title">${e.title || '—'}</div>
       <div class="event-when">${when}</div>
-      ${metaHtml}
-      ${impactHtml}
+      ${metaHtml}${impactHtml}
     </div>`;
   }).join('');
 }
 
-// ── NEWS (крипто-новости через Railway backend → RSS) ─────────────────────────
+function filterCal(period, btn) {
+  _calFilter = period;
+  document.querySelectorAll('#cal-period-tabs .ptab').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  const now = new Date();
+  const todayStr  = now.toISOString().slice(0,10);
+  const tomorrowStr = new Date(now.getTime() + 86400000).toISOString().slice(0,10);
+  // конец этой недели (ближайшее воскресенье)
+  const weekEnd = new Date(now);
+  weekEnd.setDate(now.getDate() + (7 - now.getDay() || 7));
+  const weekEndStr = weekEnd.toISOString().slice(0,10);
+  // конец месяца
+  const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+  const monthEndStr = monthEnd.toISOString().slice(0,10);
+
+  let filtered;
+  switch(period) {
+    case 'today':    filtered = _calEvents.filter(e => e.date.slice(0,10) === todayStr); break;
+    case 'tomorrow': filtered = _calEvents.filter(e => e.date.slice(0,10) === tomorrowStr); break;
+    case 'week':     filtered = _calEvents.filter(e => e.date.slice(0,10) >= todayStr && e.date.slice(0,10) <= weekEndStr); break;
+    case 'month':    filtered = _calEvents.filter(e => e.date.slice(0,10) >= todayStr && e.date.slice(0,10) <= monthEndStr); break;
+    default:         filtered = _calEvents;
+  }
+  _renderCalEvents(filtered);
+}
+
+async function loadCalendar() {
+  const el = document.getElementById('cal-list');
+  el.innerHTML = '<div class="loader"><span class="spinner">⏳</span>Загружаем события...</div>';
+  const events = await backendAPI('/api/calendar');
+  if (!events || !events.length) {
+    el.innerHTML = '<div class="empty">⚠️ Данные временно недоступны</div>';
+    return;
+  }
+  _calEvents = events;
+  // Применяем текущий фильтр (по умолчанию — эта неделя)
+  const activeTab = document.querySelector('#cal-period-tabs .ptab.active');
+  if (activeTab) filterCal(_calFilter, activeTab);
+  else _renderCalEvents(events);
+}
+
+// ── NEWS (фильтрация по периоду и языку) ──────────────────────────────────────
+let _allNews = [];
+const _RU_SOURCES = new Set(['Forklog', 'BeInCrypto RU', 'Bits.Media']);
+
+function _timeAgo(ts) {
+  if (!ts) return '';
+  const diff = Math.floor((Date.now() / 1000) - ts);
+  if (diff < 60)   return 'только что';
+  if (diff < 3600) return `${Math.floor(diff/60)} мин назад`;
+  if (diff < 86400) return `${Math.floor(diff/3600)} ч назад`;
+  return `${Math.floor(diff/86400)} дн назад`;
+}
+
+function _renderNews(news) {
+  const el = document.getElementById('news-list');
+  if (!news.length) { el.innerHTML = '<div class="empty">Нет новостей за этот период</div>'; return; }
+  el.innerHTML = news.map((n, i) => {
+    const src  = n.source ? `<span class="news-src">${n.source}</span>` : '';
+    const link = n.url    ? `<a class="news-link" href="${n.url}" target="_blank">🔗 Читать</a>` : '';
+    const ago  = n.pub_ts ? `<span style="color:var(--muted);font-size:11px">${_timeAgo(n.pub_ts)}</span>` : '';
+    return `<div class="news-row">
+      <div class="news-title">${i+1}. ${n.title || '—'}</div>
+      <div class="news-meta">${src}${ago}${link}</div>
+    </div>`;
+  }).join('');
+}
+
+function filterNews(type, btn) {
+  document.querySelectorAll('#news-period-tabs .ptab').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  const now = Date.now() / 1000;
+  let filtered;
+  switch(type) {
+    case '3h':    filtered = _allNews.filter(n => !n.pub_ts || now - n.pub_ts <= 10800); break;
+    case 'today': filtered = _allNews.filter(n => !n.pub_ts || now - n.pub_ts <= 86400); break;
+    case 'ru':    filtered = _allNews.filter(n => _RU_SOURCES.has(n.source)); break;
+    case 'en':    filtered = _allNews.filter(n => !_RU_SOURCES.has(n.source)); break;
+    default:      filtered = _allNews;
+  }
+  _renderNews(filtered);
+}
+
 async function loadNews() {
   const el = document.getElementById('news-list');
   el.innerHTML = '<div class="loader"><span class="spinner">⏳</span>Загружаем новости...</div>';
-  const news = await backendAPI('/api/news?limit=10');
+  const news = await backendAPI('/api/news?limit=20');
   if (!news || !news.length) {
     el.innerHTML = '<div class="empty">⚠️ Новости временно недоступны</div>';
     return;
   }
-  el.innerHTML = news.map((n, i) => {
-    const src  = n.source ? `<span class="news-src">${n.source}</span>` : '';
-    const link = n.url    ? `<a class="news-link" href="${n.url}" target="_blank">🔗 Читать</a>` : '';
-    return `<div class="news-row">
-      <div class="news-title">${i+1}. ${n.title || '—'}</div>
-      <div class="news-meta">${src}${link}</div>
+  _allNews = news;
+  const activeTab = document.querySelector('#news-period-tabs .ptab.active');
+  if (activeTab) filterNews('all', activeTab);
+  else _renderNews(news);
+}
+
+// ── TOP-50 (с сортировкой и поиском) ──────────────────────────────────────────
+let _top50Data   = [];
+let _top50Sort   = 'vol';
+
+function fmtVol(v) {
+  if (!v) return '—';
+  if (v >= 1e9) return '$' + (v/1e9).toFixed(1) + 'B';
+  if (v >= 1e6) return '$' + (v/1e6).toFixed(0) + 'M';
+  return '$' + v.toFixed(0);
+}
+
+function _renderTop50(data) {
+  const el = document.getElementById('top50-list');
+  if (!data.length) { el.innerHTML = '<div class="empty">Ничего не найдено</div>'; return; }
+  el.innerHTML = data.map((t, i) => {
+    const chgCls = t.change_24h >= 0 ? 'change-pos' : 'change-neg';
+    return `<div class="top50-row">
+      <span class="top50-rank">${i+1}</span>
+      <span class="top50-sym">${t.symbol}</span>
+      <span class="coin-right" style="text-align:right">
+        <div style="font-weight:600;font-size:13px">${fmtPrice(t.price)}</div>
+        <div><span class="${chgCls}">${t.change_24h >= 0 ? '+' : ''}${t.change_24h.toFixed(2)}%</span>
+             <span class="top50-vol"> ${fmtVol(t.volume_24h)}</span></div>
+      </span>
     </div>`;
   }).join('');
 }
 
+function sortTop50(by, btn) {
+  _top50Sort = by;
+  document.querySelectorAll('#top50-sort-tabs .ptab').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  applyTop50Filter();
+}
+
+function filterTop50() { applyTop50Filter(); }
+
+function applyTop50Filter() {
+  const q = (document.getElementById('top50-search')?.value || '').toLowerCase().trim();
+  let data = _top50Data.filter(t => !q || t.symbol.toLowerCase().includes(q));
+  switch(_top50Sort) {
+    case 'chg_desc': data.sort((a,b) => b.change_24h - a.change_24h); break;
+    case 'chg_asc':  data.sort((a,b) => a.change_24h - b.change_24h); break;
+    case 'price':    data.sort((a,b) => b.price - a.price); break;
+    default:         data.sort((a,b) => b.volume_24h - a.volume_24h);
+  }
+  _renderTop50(data);
+}
+
+async function loadTop50() {
+  const data = await backendAPI('/api/prices/top50');
+  if (!data || !data.length) {
+    document.getElementById('top50-list').innerHTML = '<div class="empty">⚠️ Недоступно</div>';
+    return;
+  }
+  _top50Data = data;
+  const upd = document.getElementById('top50-upd');
+  if (upd) upd.textContent = new Date().toLocaleTimeString('ru', {hour:'2-digit',minute:'2-digit'});
+  applyTop50Filter();
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 loadPrices();
+loadTop50();
 </script>
 </body>
 </html>

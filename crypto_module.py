@@ -384,24 +384,43 @@ _RSS_SOURCES = [
     ("Decrypt",       "https://decrypt.co/feed"),
 ]
 
-def _parse_rss(url: str, source: str, limit: int) -> list:
-    """Парсит один RSS-фид, возвращает список новостей."""
+def _parse_rfc822(date_str: str) -> int:
+    """Парсит RFC 822 дату из RSS в Unix timestamp. Возвращает 0 при ошибке."""
+    if not date_str:
+        return 0
+    import email.utils
     try:
-        r = requests.get(url, timeout=10,
-                         headers={"User-Agent": "Mozilla/5.0"})
+        parsed = email.utils.parsedate_to_datetime(date_str.strip())
+        return int(parsed.timestamp())
+    except Exception:
+        return 0
+
+def _parse_rss(url: str, source: str, limit: int) -> list:
+    """Парсит один RSS-фид, возвращает список новостей с датой публикации."""
+    try:
+        r = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
         if r.status_code != 200:
             return []
         items = re.findall(r"<item>(.*?)</item>", r.text, re.DOTALL)
         result = []
         for item in items[:limit]:
-            # title: CDATA или обычный тег
-            tm = re.search(r"<title><!\[CDATA\[(.*?)\]\]></title>", item)               or re.search(r"<title>(.*?)</title>", item)
+            tm = (re.search(r"<title><!\[CDATA\[(.*?)\]\]></title>", item)
+                  or re.search(r"<title>(.*?)</title>", item))
             lm = re.search(r"<link>(.*?)</link>", item)
+            dm = re.search(r"<pubDate>(.*?)</pubDate>", item)
             title = tm.group(1).strip() if tm else ""
             link  = lm.group(1).strip() if lm else ""
+            pub_date_str = dm.group(1).strip() if dm else ""
+            pub_ts = _parse_rfc822(pub_date_str)
             if title and len(title) > 5:
-                result.append({"id": link or title, "title": title,
-                               "url": link, "source": source})
+                result.append({
+                    "id":       link or title,
+                    "title":    title,
+                    "url":      link,
+                    "source":   source,
+                    "pub_ts":   pub_ts,  # Unix timestamp, 0 если неизвестно
+                    "pub_date": pub_date_str,
+                })
         return result
     except Exception:
         return []

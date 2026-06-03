@@ -3030,12 +3030,56 @@ def api_portfolio_add():
 
 @app.route("/api/news")
 def api_news():
-    """Крипто-новости для miniapp (RSS + CryptoPanic если есть ключ)."""
+    """Крипто-новости для miniapp (RSS + CryptoPanic если есть ключ).
+    ?limit=N  — кол-во новостей (макс 20)
+    ?hours=N  — только за последние N часов (0 = все)
+    """
     from flask import jsonify, request as freq
-    limit = min(int(freq.args.get("limit", 8)), 15)
+    import time as _time
+    limit = min(int(freq.args.get("limit", 10)), 20)
+    hours = int(freq.args.get("hours", 0))
     try:
-        news = get_crypto_news(limit=limit)
-        return jsonify(news)
+        news = get_crypto_news(limit=limit + 5)  # берём с запасом для фильтрации
+        if hours > 0:
+            cutoff = _time.time() - hours * 3600
+            news = [n for n in news if n.get("pub_ts", 0) >= cutoff or n.get("pub_ts", 0) == 0]
+        return jsonify(news[:limit])
+    except Exception:
+        return jsonify([])
+
+
+@app.route("/api/prices/top50")
+def api_prices_top50():
+    """ТОП-50 монет по объёму торгов (Binance USDT пары)."""
+    from flask import jsonify
+    from chart_module import _SKIP_COINS, _SKIP_SUFFIXES
+    from crypto_module import _cache_get, _cache_set
+    cached = _cache_get("top50")
+    if cached:
+        return jsonify(cached)
+    try:
+        r = requests.get("https://api.binance.com/api/v3/ticker/24hr", timeout=10)
+        if r.status_code != 200:
+            return jsonify([])
+        tickers = [
+            t for t in r.json()
+            if t["symbol"].endswith("USDT")
+            and float(t.get("lastPrice", 0)) > 0
+            and float(t.get("quoteVolume", 0)) > 1_000_000
+            and not any(t["symbol"].replace("USDT","") in _SKIP_COINS)
+            and not any(sfx in t["symbol"] for sfx in _SKIP_SUFFIXES)
+        ]
+        tickers.sort(key=lambda t: float(t.get("quoteVolume", 0)), reverse=True)
+        result = [{
+            "symbol":    t["symbol"].replace("USDT", ""),
+            "price":     float(t["lastPrice"]),
+            "change_24h": float(t.get("priceChangePercent", 0)),
+            "volume_24h": float(t.get("quoteVolume", 0)),
+            "high_24h":  float(t.get("highPrice", 0)),
+            "low_24h":   float(t.get("lowPrice", 0)),
+        } for t in tickers[:50]]
+        _cache_set("top50", result, ttl=120)  # кэш 2 мин
+        return jsonify(result)
     except Exception:
         return jsonify([])
 

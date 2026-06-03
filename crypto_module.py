@@ -35,26 +35,107 @@ def _cache_set(key: str, data, ttl: int = 300):
             _CACHE.pop(k, None)
 
 COIN_ALIASES = {
+    # BTC
     "btc":"bitcoin","биток":"bitcoin","биткоин":"bitcoin","bitcoin":"bitcoin",
+    # ETH
     "eth":"ethereum","эфир":"ethereum","эфириум":"ethereum","ethereum":"ethereum",
-    "sol":"solana","солана":"solana",
-    "bnb":"binancecoin","бнб":"binancecoin",
-    "xrp":"ripple","рипл":"ripple",
-    "ada":"cardano","кардано":"cardano",
-    "doge":"dogecoin","додж":"dogecoin",
+    # SOL
+    "sol":"solana","солана":"solana","solana":"solana",
+    # BNB
+    "bnb":"binancecoin","бнб":"binancecoin","binancecoin":"binancecoin",
+    # XRP
+    "xrp":"ripple","рипл":"ripple","ripple":"ripple",
+    # ADA
+    "ada":"cardano","кардано":"cardano","cardano":"cardano",
+    # DOGE
+    "doge":"dogecoin","додж":"dogecoin","dogecoin":"dogecoin",
+    # TON
     "ton":"the-open-network","тон":"the-open-network",
+    # Stables
     "usdt":"tether","usdc":"usd-coin",
-    "ltc":"litecoin","avax":"avalanche-2",
-    "dot":"polkadot","link":"chainlink",
-    "shib":"shiba-inu","trx":"tron",
+    # LTC
+    "ltc":"litecoin","litecoin":"litecoin",
+    # AVAX
+    "avax":"avalanche-2","avax":"avalanche-2",
+    # DOT
+    "dot":"polkadot","polkadot":"polkadot",
+    # LINK
+    "link":"chainlink","chainlink":"chainlink",
+    # SHIB
+    "shib":"shiba-inu","shiba-inu":"shiba-inu",
+    # TRX
+    "trx":"tron","tron":"tron",
+    # MATIC/POL
     "matic":"matic-network","pol":"matic-network",
-    "near":"near","arb":"arbitrum","op":"optimism",
-    "sui":"sui","apt":"aptos","not":"notcoin",
+    # NEAR
+    "near":"near",
+    # ARB
+    "arb":"arbitrum","arbitrum":"arbitrum",
+    # OP
+    "op":"optimism","optimism":"optimism",
+    # SUI
+    "sui":"sui",
+    # APT
+    "apt":"aptos","aptos":"aptos",
+    # NOT
+    "not":"notcoin","notcoin":"notcoin",
+    # Popular coins NOT previously in aliases
+    "inj":"injective-protocol","injective":"injective-protocol",
+    "pepe":"pepe",
+    "wld":"worldcoin-wld","worldcoin":"worldcoin-wld",
+    "uni":"uniswap","uniswap":"uniswap",
+    "atom":"cosmos","cosmos":"cosmos",
+    "ftm":"fantom","fantom":"fantom",
+    "sand":"the-sandbox",
+    "mana":"decentraland","decentraland":"decentraland",
+    "gala":"gala",
+    "ape":"apecoin","apecoin":"apecoin",
+    "fet":"fetch-ai","fetch":"fetch-ai",
+    "agix":"singularitynet",
+    "grt":"the-graph","graph":"the-graph",
+    "ldo":"lido-dao","lido":"lido-dao",
+    "mkr":"maker","maker":"maker",
+    "crv":"curve-dao-token","curve":"curve-dao-token",
+    "aave":"aave",
+    "snx":"havven","synthetix":"havven",
+    "comp":"compound-governance-token","compound":"compound-governance-token",
+    "rndr":"render-token","render":"render-token",
+    "imx":"immutable-x","immutable":"immutable-x",
+    "blur":"blur","blurr":"blur",
+    "floki":"floki",
+    "bonk":"bonk",
+    "wif":"dogwifcoin",
+    "jto":"jito-network",
+    "pyth":"pyth-network",
+    "w":"wormhole","wormhole":"wormhole",
+    "eigen":"eigenlayer",
+    "tia":"celestia","celestia":"celestia",
+    "sei":"sei-network","sei":"sei-network",
+    "strk":"starknet","starknet":"starknet",
+    "zk":"zksync","zksync":"zksync",
+    "mnt":"mantle","mantle":"mantle",
+    "kas":"kaspa","kaspa":"kaspa",
+    "xmr":"monero","monero":"monero",
+    "bch":"bitcoin-cash","bch":"bitcoin-cash",
+    "fil":"filecoin","filecoin":"filecoin",
+    "icp":"internet-computer",
+    "hbar":"hedera-hashgraph","hedera":"hedera-hashgraph",
+    "algo":"algorand","algorand":"algorand",
+    "xtz":"tezos","tezos":"tezos",
+    "egld":"elrond-erd-2","elrond":"elrond-erd-2",
+    "theta":"theta-token",
+    "vet":"vechain","vechain":"vechain",
+    "cfx":"conflux-token","conflux":"conflux-token",
+    "stx":"blockstack","stacks":"blockstack",
+    "rune":"thorchain","thorchain":"thorchain",
+    "kava":"kava",
+    "zil":"zilliqa","zilliqa":"zilliqa",
+    "rose":"oasis-network","oasis":"oasis-network",
 }
 
 
 # ══ ЦЕНЫ ═══════════════════════════════════════════════════════════════════════
-# Binance символы для fallback
+# Binance символы (CoinGecko ID → Binance trading pair)
 _BINANCE_SYMBOLS = {
     "bitcoin":"BTCUSDT","ethereum":"ETHUSDT","solana":"SOLUSDT",
     "binancecoin":"BNBUSDT","ripple":"XRPUSDT","cardano":"ADAUSDT",
@@ -62,7 +143,45 @@ _BINANCE_SYMBOLS = {
     "avalanche-2":"AVAXUSDT","polkadot":"DOTUSDT","chainlink":"LINKUSDT",
     "near":"NEARUSDT","arbitrum":"ARBUSDT","optimism":"OPUSDT",
     "tron":"TRXUSDT","shiba-inu":"SHIBUSDT",
+    "litecoin":"LTCUSDT","matic-network":"MATICUSDT",
+    # Popular additions
+    "injective-protocol":"INJUSDT","pepe":"PEPEUSDT",
+    "worldcoin-wld":"WLDUSDT","uniswap":"UNIUSDT",
+    "cosmos":"ATOMUSDT","fantom":"FTMUSDT",
+    "the-sandbox":"SANDUSDT","decentraland":"MANAUSDT",
+    "apecoin":"APEUSDT","fetch-ai":"FETUSDT",
+    "the-graph":"GRTUSDT","lido-dao":"LDOUSDT",
+    "maker":"MKRUSDT","aave":"AAVEUSDT",
+    "render-token":"RNDRUSDT","immutable-x":"IMXUSDT",
+    "dogwifcoin":"WIFUSDT","bonk":"BONKUSDT",
+    "floki":"FLOKIUSDT","jito-network":"JTOUSDT",
+    "pyth-network":"PYTHUSDT","celestia":"TIAUSDT",
+    "sei-network":"SEIUSDT","starknet":"STRKUSDT",
+    "mantle":"MNTUSDT","kaspa":"KASUSDT",
+    "bitcoin-cash":"BCHUSDT","filecoin":"FILUSDT",
+    "internet-computer":"ICPUSDT","hedera-hashgraph":"HBARUSDT",
+    "algorand":"ALGOUSDT","vechain":"VETUSDT",
+    "thorchain":"RUNEUSDT","kava":"KAVAUSDT",
+    "zilliqa":"ZILUSDT","oasis-network":"ROSEUSDT",
+    "singularitynet":"AGIXUSDT","curve-dao-token":"CRVUSDT",
+    "havven":"SNXUSDT","blur":"BLURUSDT",
+    "wormhole":"WUSDT","elrond-erd-2":"EGLDUSDT",
+    "theta-token":"THETAUSDT","blockstack":"STXUSDT",
+    "conflux-token":"CFXUSDT","gala":"GALAUSDT",
+    "zksync":"ZKUSDT","monero":"XMRUSDT",
 }
+
+def _resolve_binance_symbol(coin_id: str) -> Optional[str]:
+    """Пробует найти Binance символ для монеты разными способами."""
+    # 1. Прямой маппинг
+    sym = _BINANCE_SYMBOLS.get(coin_id)
+    if sym:
+        return sym
+    # 2. Угадываем по верхнему регистру: "inj" → "INJUSDT"
+    guessed = coin_id.upper().replace("-", "").replace(" ", "") + "USDT"
+    if len(guessed) <= 12:  # разумная длина символа
+        return guessed
+    return None
 
 def _get_prices_binance(coin_ids: list) -> dict:
     """PRIMARY: цены с Binance (без ключа, без rate-limit, работает всегда)."""
@@ -80,12 +199,17 @@ def _get_prices_binance(coin_ids: list) -> dict:
             return {}
     tickers = {t["symbol"]: t for t in tickers_raw}
     for coin_id in coin_ids:
-        sym = _BINANCE_SYMBOLS.get(coin_id)
+        sym = _resolve_binance_symbol(coin_id)
         if not sym:
             continue
         t = tickers.get(sym)
         if not t:
-            continue
+            # Пробуем ещё варианты написания
+            sym_alt = coin_id.split("-")[0].upper() + "USDT"
+            t = tickers.get(sym_alt)
+            if not t:
+                continue
+            sym = sym_alt
         price = float(t["lastPrice"])
         change_24h = float(t.get("priceChangePercent", 0))
         result[coin_id] = {

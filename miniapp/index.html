@@ -553,14 +553,25 @@ async function loadPortfolio() {
     const totalChange = totalPrev > 0 ? (total - totalPrev) / totalPrev * 100 : 0;
     document.getElementById('port-total').textContent = '$' + total.toLocaleString('en', {maximumFractionDigits:2});
     document.getElementById('port-change').innerHTML = fmtPct(totalChange) + ' за 24ч';
-    el.innerHTML = rows.filter(r => r.value > 0).map(row => {
-      const share = total > 0 ? row.value / total * 100 : 0;
+    el.innerHTML = rows.map(row => {
+      const share = total > 0 && row.value > 0 ? row.value / total * 100 : 0;
+      const rmBtn = `<button onclick="removeCoin('${row.coin.toLowerCase()}')" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:12px;margin-left:4px;opacity:.7">✕</button>`;
+      if (!row.price || row.value === 0) {
+        // Монета есть в портфеле, но цена не найдена — показываем с пометкой
+        return `<div class="port-coin">
+          <div class="port-coin-left">
+            <div>
+              <div style="font-weight:600">${row.coin}${rmBtn}</div>
+              <div class="port-coin-amount" style="color:var(--orange)">${row.amount} шт — цена не найдена</div>
+            </div>
+          </div>
+          <div style="text-align:right;color:var(--muted)">—</div>
+        </div>`;
+      }
       return `<div class="port-coin">
         <div class="port-coin-left">
           <div>
-            <div style="font-weight:600">${row.coin}
-              <button onclick="removeCoin('${row.coin.toLowerCase()}')" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:14px;margin-left:6px">✕</button>
-            </div>
+            <div style="font-weight:600">${row.coin}${rmBtn}</div>
             <div class="port-coin-amount">${row.amount.toLocaleString('en',{maximumFractionDigits:8})} × ${fmtPrice(row.price)}</div>
           </div>
         </div>
@@ -572,7 +583,7 @@ async function loadPortfolio() {
           </div>
         </div>
       </div>`;
-    }).join('') || '<div class="empty">Нет данных о ценах</div>';
+    }).join('') || '<div class="empty">Нет данных</div>';
   } catch {
     el.innerHTML = '<div class="empty">⚠️ Ошибка загрузки цен</div>';
   }

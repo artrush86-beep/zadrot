@@ -1280,18 +1280,30 @@ def should_random_reply() -> bool:
 # ══════════════════════════════════════════════════════════════════════════════
 @bot.message_handler(commands=["start"])
 def cmd_start(m):
-    _reply(m, (
+    """Приветствие + кнопка miniapp."""
+    text = (
         "👮 <b>Statham Bot v5.0</b> — Railway + Redis + Crypto\n\n"
         "Слежу за порядком в <b>Statham Elite</b> 🚀\n\n"
         "📋 /rules — правила чата\n"
         "❓ /help — все команды\n"
-        "📊 /mystats — твоя статистика + XP\n"
-        "🏆 /top — топ участников\n"
-        "🤖 /ai [вопрос] — AI (Groq + Gemini)\n"
-        "📈 /price btc eth — цены крипты\n"
+        "📊 /price btc eth — цены крипты\n"
         "😱 /fear — Fear & Greed Index\n"
-        "🔔 /alert btc 100000 — ценовой алерт"
-    ))
+        "🔔 /alert btc 100000 — ценовой алерт\n"
+        "📱 /app — открыть крипто-дашборд"
+    )
+    if PA_DOMAIN:
+        url = f"https://{PA_DOMAIN}/miniapp/"
+        markup = telebot.types.InlineKeyboardMarkup()
+        markup.add(telebot.types.InlineKeyboardButton(
+            text="📊 Открыть Statham App",
+            web_app=telebot.types.WebAppInfo(url=url)
+        ))
+        try:
+            bot.send_message(m.chat.id, text, parse_mode="HTML", reply_markup=markup)
+            return
+        except Exception:
+            pass
+    _reply(m, text)
 
 @bot.message_handler(commands=["help"])
 def cmd_help(m):
@@ -2672,11 +2684,10 @@ def cmd_summary(m):
 # 📱 TELEGRAM MINI APP
 # ══════════════════════════════════════════════════════════════════════════════
 
-@bot.message_handler(commands=["app", "webapp", "mini", "портал"])
-def cmd_webapp(m):
-    """📱 Открыть Mini App — портфель, цены, алерты, календарь."""
+def _send_miniapp_button(chat_id: int):
+    """Отправляет сообщение с кнопкой miniapp."""
     if not PA_DOMAIN:
-        _reply(m, "❌ RAILWAY_DOMAIN не задан в переменных окружения Railway."); return
+        return False
     url = f"https://{PA_DOMAIN}/miniapp/"
     markup = telebot.types.InlineKeyboardMarkup()
     markup.add(telebot.types.InlineKeyboardButton(
@@ -2685,18 +2696,31 @@ def cmd_webapp(m):
     ))
     try:
         bot.send_message(
-            m.chat.id,
+            chat_id,
             "📱 <b>Statham Mini App</b>\n\n"
-            "Полноценный крипто-дашборд прямо в Telegram:\n"
-            "• 📊 Цены BTC/ETH/SOL/BNB/TON + Fear&Greed\n"
-            "• 💼 Личный портфель с оценкой\n"
-            "• 🔔 Ценовые алерты\n"
-            "• 📅 Календарь ФРС и макро-событий",
+            "Крипто-дашборд прямо в Telegram:\n"
+            "• 📊 Цены Топ-5 и Топ-50 монет + Fear&Greed\n"
+            "• 💼 Портфель с оценкой P&L\n"
+            "• 🔔 Ценовые алерты (бот уведомит!)\n"
+            "• 📅 Экономический календарь (ФРС, CPI, NFP)\n"
+            "• 📰 Крипто-новости\n\n"
+            f"<i>Или открой прямо: {url}</i>",
             parse_mode="HTML",
             reply_markup=markup
         )
+        return True
     except Exception:
-        _reply(m, f"📱 <b>Statham App:</b>\n{url}")
+        return False
+
+@bot.message_handler(commands=["app", "webapp", "mini", "miniapp", "минипп", "портал", "дашборд"])
+def cmd_webapp(m):
+    """📱 Открыть Mini App — портфель, цены, алерты, календарь."""
+    write_log(f"CMD /app | uid={m.from_user.id} | chat={m.chat.id}")
+    if not PA_DOMAIN:
+        _reply(m, "❌ RAILWAY_DOMAIN не задан в переменных окружения Railway."); return
+    if not _send_miniapp_button(m.chat.id):
+        url = f"https://{PA_DOMAIN}/miniapp/"
+        _reply(m, f"📱 <b>Statham App:</b> {url}")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # WEBHOOK + FLASK ROUTES
@@ -3176,6 +3200,21 @@ def health():
 # ⏰ APSCHEDULER — встроенный cron (не нужны внешние Railway Cron Jobs)
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _miniapp_markup():
+    """Возвращает InlineKeyboardMarkup с кнопкой miniapp (или None если домен не задан)."""
+    if not PA_DOMAIN:
+        return None
+    try:
+        url = f"https://{PA_DOMAIN}/miniapp/"
+        markup = telebot.types.InlineKeyboardMarkup()
+        markup.add(telebot.types.InlineKeyboardButton(
+            text="📊 Открыть Statham App",
+            web_app=telebot.types.WebAppInfo(url=url)
+        ))
+        return markup
+    except Exception:
+        return None
+
 def _job_morning():
     """Утренний пост — 08:00 МСК."""
     write_log("SCHEDULER | morning job triggered")
@@ -3259,8 +3298,13 @@ def _job_weekly_top():
         lvl = get_level_name(u.get("level", 1))
         lines.append(f"{medals[i]} {uname} — {u['msg_count']} сообщ. | {lvl}")
     lines.append("\nПродолжайте в том же духе! 💪")
+    lines.append("\n📱 <i>Крипто-дашборд: /app</i>")
     try:
-        _send_message_simple(int(CHAT_ID), "\n".join(lines), parse_mode="HTML")
+        markup = _miniapp_markup()
+        if markup:
+            bot.send_message(int(CHAT_ID), "\n".join(lines), parse_mode="HTML", reply_markup=markup)
+        else:
+            _send_message_simple(int(CHAT_ID), "\n".join(lines), parse_mode="HTML")
         write_log(f"CRON_OK | weekly_top sent to {CHAT_ID}")
     except Exception as e:
         write_log(f"WEEKLY_TOP_ERR | {e}")

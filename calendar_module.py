@@ -22,16 +22,24 @@ _FED_DATES_2025_2026 = [
     "2026-10-28", "2026-12-09",
 ]
 
-# ── Приоритет событий (1=высокий, 2=средний) ──────────────────────────────────
+# ── Приоритет событий ──────────────────────────────────────────────────────────
 _HIGH_IMPACT_KEYWORDS = [
     "federal reserve", "fed rate", "fomc", "interest rate decision",
     "non-farm payroll", "nonfarm", "nfp", "jobs report",
     "cpi", "consumer price index", "inflation",
     "gdp", "gross domestic product",
-    "jerome powell", "powell speech",
+    "jerome powell", "powell speech", "powell",
     "ppi", "producer price",
     "unemployment rate", "jobless claims",
     "retail sales",
+    "crude oil", "oil inventories", "eia crude",
+    "core inflation", "core cpi", "core pce", "pce",
+    "ism manufacturing", "ism services",
+    "durable goods",
+    "housing starts", "building permits",
+    "consumer confidence", "consumer sentiment",
+    "trade balance",
+    "treasury", "10-year", "bond auction",
 ]
 
 _EVENT_TRANSLATIONS = {
@@ -41,19 +49,60 @@ _EVENT_TRANSLATIONS = {
     "non-farm payroll":"👷 NFP — Занятость вне с/х (США)",
     "nonfarm":         "👷 NFP — Данные по занятости (США)",
     "nfp":             "👷 NFP — Занятость (США)",
+    "cpi m/m":         "📊 CPI м/м — Месячная инфляция США",
+    "cpi y/y":         "📊 CPI г/г — Годовая инфляция США",
+    "core cpi":        "📊 Core CPI — Базовая инфляция (без еды и энергии)",
     "cpi":             "📊 CPI — Индекс потребительских цен (инфляция)",
     "consumer price":  "📊 CPI — Инфляция США",
+    "core pce":        "📊 Core PCE — Базовый дефлятор расходов (цель ФРС)",
+    "pce":             "📊 PCE — Дефлятор личных расходов",
     "gdp":             "💹 ВВП — Данные по экономике США",
     "gross domestic":  "💹 ВВП США",
     "ppi":             "🏭 PPI — Индекс цен производителей",
     "producer price":  "🏭 PPI — Цены производителей",
+    "unemployment rate":"👤 Уровень безработицы США",
     "unemployment":    "👤 Безработица — США",
-    "jobless claims":  "👤 Первичные заявки по безработице",
+    "jobless claims":  "👤 Заявки по безработице (недельные)",
+    "initial jobless": "👤 Первичные заявки по безработице",
+    "continuing claim":"👤 Повторные заявки по безработице",
     "retail sales":    "🛒 Розничные продажи — США",
+    "core retail":     "🛒 Базовые розничные продажи",
     "powell":          "🎤 Выступление Пауэлла (Глава ФРС)",
     "jerome":          "🎤 Выступление Пауэлла",
     "inflation":       "📊 Данные по инфляции",
     "interest rate":   "🏦 Решение по процентной ставке",
+    "crude oil inventories": "🛢 EIA: Запасы сырой нефти США",
+    "crude oil":       "🛢 Запасы нефти — США (EIA)",
+    "eia crude":       "🛢 EIA: Запасы нефти США",
+    "oil inventories": "🛢 Запасы нефти США",
+    "ism manufacturing":"🏭 ISM: Деловая активность в промышленности",
+    "ism services":    "📋 ISM: Деловая активность в услугах",
+    "durable goods":   "⚙️ Заказы на товары длительного пользования",
+    "housing starts":  "🏠 Строительство новых домов",
+    "building permits":"🏗 Разрешения на строительство",
+    "consumer confidence":"🛍 Индекс потребительской уверенности",
+    "consumer sentiment":"🛍 Индекс потребительских настроений (U. Michigan)",
+    "trade balance":   "⚖️ Торговый баланс США",
+    "treasury":        "📜 Аукцион казначейских облигаций",
+    "10-year":         "📜 Доходность 10-летних облигаций США",
+}
+
+# Описание влияния каждого события на крипто-рынок
+_EVENT_CRYPTO_IMPACT = {
+    "cpi":             "📈 Выше прогноза → ФРС может повысить ставку → давление на крипту. Ниже → позитив.",
+    "core cpi":        "📈 Базовая инфляция — ключевой показатель для ФРС. Снижение = позитив для BTC.",
+    "core pce":        "📈 Любимый показатель ФРС. Снижение PCE = вероятность снижения ставки = рост крипты.",
+    "federal reserve": "⚡ МАКСИМАЛЬНАЯ ВОЛАТИЛЬНОСТЬ. Ожидай движения ±5-10% в течение часа.",
+    "fomc":            "⚡ Протоколы ФРС — может дать сигналы о будущих ставках. Высокая волатильность.",
+    "non-farm payroll":"📊 Сильный рынок труда → ФРС не торопится снижать ставку → осторожно.",
+    "nonfarm":         "📊 NFP: сильные данные обычно негативны для крипты краткосрочно.",
+    "unemployment":    "📊 Рост безработицы → ФРС склонна снижать ставку → позитив для крипты.",
+    "gdp":             "💹 Слабый ВВП → вероятность стимулирования → осторожный позитив для крипты.",
+    "crude oil":       "🛢 Нефть влияет на инфляцию → рост нефти = потенциальное давление на крипту.",
+    "ism manufacturing":"🏭 Снижение PMI → замедление экономики → риск off, осторожно с позициями.",
+    "consumer confidence":"🛍 Падение уверенности → риск снижения расходов → нейтрально/негативно.",
+    "retail sales":    "🛒 Сильные продажи = ФРС не снижает ставку. Слабые = позитив для крипты.",
+    "ppi":             "🏭 PPI опережает CPI. Снижение PPI → будущая дефляция → потенциальный позитив.",
 }
 
 def _translate_event(title: str) -> str:
@@ -61,7 +110,16 @@ def _translate_event(title: str) -> str:
     for en, ru in _EVENT_TRANSLATIONS.items():
         if en in tl:
             return ru
-    return title  # оставить оригинал если не нашли перевод
+    return title
+
+
+def get_crypto_impact(title: str) -> str:
+    """Возвращает описание влияния события на крипто-рынок."""
+    tl = title.lower()
+    for kw, impact in _EVENT_CRYPTO_IMPACT.items():
+        if kw in tl:
+            return impact
+    return "📊 Следи за реакцией рынка после выхода данных."
 
 def _is_high_impact(title: str) -> bool:
     tl = title.lower()
@@ -85,17 +143,24 @@ def _fetch_forexfactory() -> list[dict]:
         for item in r.json():
             if item.get("country", "").upper() != "USD":
                 continue
-            if item.get("impact", "").lower() not in ("high", "medium"):
+            impact = item.get("impact", "").lower()
+            if impact not in ("high", "medium"):
                 continue
-            title = item.get("title", "")
-            date_str = item.get("date", "")  # "01-13-2025"
-            time_str = item.get("time", "")  # "8:30am"
+            title    = item.get("title", "")
+            date_str = item.get("date", "")   # "01-13-2025"
+            time_str = item.get("time", "")   # "8:30am"
+            forecast = item.get("forecast", "") or ""
+            previous = item.get("previous", "") or ""
+            actual   = item.get("actual",   "") or ""
             events.append({
-                "title": title,
-                "date": date_str,
-                "time": time_str,
-                "impact": item.get("impact", "").lower(),
-                "source": "ForexFactory",
+                "title":    title,
+                "date":     date_str,
+                "time":     time_str,
+                "impact":   impact,
+                "forecast": forecast,
+                "previous": previous,
+                "actual":   actual,
+                "source":   "ForexFactory",
             })
     except Exception:
         pass

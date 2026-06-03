@@ -39,6 +39,7 @@ from redis_memory import (
 from crypto_module import (
     format_price_message, format_market_message, format_fear_greed,
     get_crypto_ai_context, check_price_alerts, COIN_ALIASES, get_prices,
+    get_crypto_news, format_news_message, format_breaking_news,
 )
 from chart_module import (
     format_chart_message, format_movers_message,
@@ -47,7 +48,7 @@ from chart_module import (
 from portfolio_module import handle_portfolio_command
 from calendar_module import (
     format_calendar_message, check_events_today, check_events_soon, format_event_alert,
-    get_upcoming_events,
+    get_upcoming_events, get_crypto_impact, _translate_event,
 )
 from game_module import (
     give_achievement, get_achievements, format_achievements,
@@ -1802,6 +1803,10 @@ def cmd_ai(m):
         ))
         return
 
+    if not check_rate_limit(m.from_user.id, "ai", max_calls=5, window=60):
+        _reply(m, "⏳ Слишком много вопросов! Подожди минуту (лимит 5 в минуту).")
+        return
+
     if not ai.api_key:
         _reply(m, "❌ AI сейчас недоступен. Попробуй позже.")
         return
@@ -2036,6 +2041,13 @@ def handle_ai_prefix(m):
             ), parse_mode="HTML")
         except Exception as e:
             write_log(f"AI_PREFIX_HELP_ERR | {type(e).__name__}")
+        return
+
+    if not check_rate_limit(m.from_user.id, "ai", max_calls=5, window=60):
+        try:
+            _reply_to_with_retry(m, "⏳ Слишком много вопросов! Подожди минуту.", parse_mode="HTML")
+        except Exception:
+            pass
         return
 
     if not ai.api_key:
@@ -2358,6 +2370,26 @@ def cmd_redis_stat(m):
 # ══════════════════════════════════════════════════════════════════════════════
 # 📊 НОВЫЕ КРИПТО-КОМАНДЫ v6.0 (Уровень 2)
 # ══════════════════════════════════════════════════════════════════════════════
+
+@bot.message_handler(commands=["news", "новости"])
+def cmd_news(m):
+    """📰 Крипто-новости из RSS. /news [кол-во]"""
+    if not check_rate_limit(m.from_user.id, "news", max_calls=3, window=60):
+        _reply(m, "⏳ Подожди немного."); return
+    try:
+        bot.send_chat_action(m.chat.id, "typing")
+    except Exception:
+        pass
+    parts = m.text.split()
+    limit = 5
+    if len(parts) > 1:
+        try: limit = max(1, min(10, int(parts[1])))
+        except ValueError: pass
+    news = get_crypto_news(limit=limit)
+    msg = format_news_message(news)
+    _reply(m, msg)
+    add_xp(m.from_user.id, 1)
+
 
 @bot.message_handler(commands=["chart", "график"])
 def cmd_chart(m):
@@ -2958,22 +2990,78 @@ def api_alerts_del(coin):
     return jsonify({"ok": True})
 
 
+@app.route("/api/portfolio")
+def api_portfolio_get():
+    """GET /api/portfolio?uid=<user_id> — портфель пользователя из Redis."""
+    from flask import jsonify, request as freq
+    from portfolio_module import port_get
+    uid = freq.args.get("uid", "")
+    if not uid or not str(uid).lstrip("-").isdigit():
+        return jsonify({})
+    holdings = port_get(int(uid))
+    return jsonify(holdings)
+
+
+@app.route("/api/portfolio", methods=["POST"])
+def api_portfolio_add():
+    """POST /api/portfolio — добавить/обновить монету в портфель."""
+    from flask import jsonify, request as freq
+    from portfolio_module import port_add, port_set, port_remove
+    from crypto_module import COIN_ALIASES
+    try:
+        body   = freq.get_json(force=True)
+        uid    = int(body.get("uid", 0))
+        coin   = str(body.get("coin", "")).lower().strip()
+        amount = float(body.get("amount", 0))
+        action = str(body.get("action", "add"))  # add | set | remove
+        if not uid or not coin:
+            return jsonify({"ok": False, "error": "bad_params"}), 400
+        coin_id = COIN_ALIASES.get(coin, coin)
+        if action == "remove":
+            ok = port_remove(uid, coin_id)
+        elif action == "set":
+            ok = port_set(uid, coin_id, amount)
+        else:
+            ok = port_add(uid, coin_id, amount)
+        return jsonify({"ok": ok})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+
+@app.route("/api/news")
+def api_news():
+    """Крипто-новости для miniapp (RSS + CryptoPanic если есть ключ)."""
+    from flask import jsonify, request as freq
+    limit = min(int(freq.args.get("limit", 8)), 15)
+    try:
+        news = get_crypto_news(limit=limit)
+        return jsonify(news)
+    except Exception:
+        return jsonify([])
+
+
 @app.route("/api/calendar")
 def api_calendar():
-    """Экономический календарь для miniapp."""
+    """Экономический календарь для miniapp — с прогнозом, фактом и крипто-импактом."""
     from flask import jsonify
-    from calendar_module import get_upcoming_events, _translate_event
     try:
         events = get_upcoming_events(days_ahead=30)
         result = []
         for e in events:
+            raw_title = e.get("title", "")
             result.append({
-                "title":  _translate_event(e.get("title", "")),
-                "date":   e.get("date", ""),
-                "time":   e.get("time", ""),
-                "impact": e.get("impact", "medium"),
+                "title":        _translate_event(raw_title),
+                "title_en":     raw_title,
+                "date":         e.get("date", ""),
+                "time":         e.get("time", ""),
+                "impact":       e.get("impact", "medium"),
+                "forecast":     e.get("forecast", ""),
+                "previous":     e.get("previous", ""),
+                "actual":       e.get("actual", ""),
+                "source":       e.get("source", ""),
+                "crypto_impact": get_crypto_impact(raw_title),
             })
-        return jsonify(result[:20])
+        return jsonify(result[:25])
     except Exception:
         return jsonify([])
 

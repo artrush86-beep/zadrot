@@ -366,15 +366,18 @@ _log_lock = threading.Lock()
 
 def write_log(entry: str):
     ts = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    line = f"[{ts}] {entry}"
+    # Railway/gunicorn видит stdout в реальном времени → появляется в Deploy Logs
+    print(line, flush=True)
     try:
         with _log_lock:
             with open(LOG_FILE, "a", encoding="utf-8") as f:
-                f.write(f"[{ts}] {entry}\n")
+                f.write(line + "\n")
             with open(LOG_FILE, "r", encoding="utf-8") as f:
                 lines = f.readlines()
-            if len(lines) > 1000:
+            if len(lines) > 2000:
                 with open(LOG_FILE, "w", encoding="utf-8") as f:
-                    f.writelines(lines[-1000:])
+                    f.writelines(lines[-2000:])
     except Exception:
         pass
 
@@ -2202,7 +2205,8 @@ def handle_message(message):
 @bot.message_handler(commands=["price", "p", "цена"])
 def cmd_price(m):
     """📊 Цены криптовалют. /price btc eth sol"""
-    if not check_rate_limit(m.from_user.id, "price", max_calls=10, window=60):
+    uid = m.from_user.id
+    if not check_rate_limit(uid, "price", max_calls=10, window=60):
         _reply(m, "⏳ Слишком частые запросы. Подожди минуту."); return
     parts = m.text.split()[1:]
     if not parts:
@@ -2219,40 +2223,49 @@ def cmd_price(m):
     except Exception:
         pass
     coins = [c.lower() for c in parts[:5]]
+    write_log(f"CMD /price | uid={uid} | coins={coins}")
     msg = format_price_message(coins)
+    write_log(f"CMD /price OK | uid={uid} | len={len(msg)}")
     _reply(m, msg)
-    # Ачивка
-    if give_achievement(m.from_user.id, "first_price"):
-        try: bot.send_message(m.from_user.id, "🏅 Достижение: 📊 Первый запрос цены (+5 XP)", parse_mode="HTML")
+    if give_achievement(uid, "first_price"):
+        try: bot.send_message(uid, "🏅 Достижение: 📊 Первый запрос цены (+5 XP)", parse_mode="HTML")
         except Exception: pass
-    add_xp(m.from_user.id, 2)
+    add_xp(uid, 2)
 
 
 @bot.message_handler(commands=["fear", "fng", "страх"])
 def cmd_fear(m):
     """😱 Fear & Greed Index"""
-    if not check_rate_limit(m.from_user.id, "fear", max_calls=5, window=60):
+    uid = m.from_user.id
+    if not check_rate_limit(uid, "fear", max_calls=5, window=60):
         _reply(m, "⏳ Слишком частые запросы."); return
     try:
         bot.send_chat_action(m.chat.id, "typing")
     except Exception:
         pass
-    _reply(m, format_fear_greed())
-    if give_achievement(m.from_user.id, "first_fear"):
-        try: bot.send_message(m.from_user.id, "🏅 Достижение: 😱 Первый F&G запрос (+5 XP)", parse_mode="HTML")
+    write_log(f"CMD /fear | uid={uid}")
+    msg = format_fear_greed()
+    write_log(f"CMD /fear OK | uid={uid} | val={msg[:40].replace(chr(10),' ')}")
+    _reply(m, msg)
+    if give_achievement(uid, "first_fear"):
+        try: bot.send_message(uid, "🏅 Достижение: 😱 Первый F&G запрос (+5 XP)", parse_mode="HTML")
         except Exception: pass
 
 
 @bot.message_handler(commands=["market", "cap", "рынок"])
 def cmd_market(m):
     """🌍 Сводка крипторынка"""
-    if not check_rate_limit(m.from_user.id, "market", max_calls=5, window=60):
+    uid = m.from_user.id
+    if not check_rate_limit(uid, "market", max_calls=5, window=60):
         _reply(m, "⏳ Слишком частые запросы."); return
     try:
         bot.send_chat_action(m.chat.id, "typing")
     except Exception:
         pass
-    _reply(m, format_market_message())
+    write_log(f"CMD /market | uid={uid}")
+    msg = format_market_message()
+    write_log(f"CMD /market OK | uid={uid}")
+    _reply(m, msg)
 
 
 @bot.message_handler(commands=["alert", "алерт"])
@@ -2407,37 +2420,53 @@ def cmd_chart(m):
 @bot.message_handler(commands=["movers", "топ", "движение"])
 def cmd_movers(m):
     """🚀 Топ гейнеры и лузеры за 24ч из топ-100."""
-    if not check_rate_limit(m.from_user.id, "movers", max_calls=5, window=60):
+    uid = m.from_user.id
+    if not check_rate_limit(uid, "movers", max_calls=5, window=60):
         _reply(m, "⏳ Подожди немного."); return
     try: bot.send_chat_action(m.chat.id, "typing")
     except Exception: pass
-    _reply(m, format_movers_message())
+    write_log(f"CMD /movers | uid={uid}")
+    msg = format_movers_message()
+    write_log(f"CMD /movers OK | uid={uid} | len={len(msg)}")
+    _reply(m, msg)
 
 
 @bot.message_handler(commands=["alts", "альтсезон", "altseason"])
 def cmd_alts(m):
     """🌈 Альтсезон или биткоин-сезон?"""
+    uid = m.from_user.id
     try: bot.send_chat_action(m.chat.id, "typing")
     except Exception: pass
-    _reply(m, format_altseason_message())
+    write_log(f"CMD /alts | uid={uid}")
+    msg = format_altseason_message()
+    write_log(f"CMD /alts OK | uid={uid} | len={len(msg)}")
+    _reply(m, msg)
 
 
 @bot.message_handler(commands=["funding", "фандинг"])
 def cmd_funding(m):
     """💸 Funding rate фьючерсов. /funding btc"""
+    uid = m.from_user.id
     parts = m.text.split()[1:]
     coin = parts[0].lower() if parts else "btc"
     try: bot.send_chat_action(m.chat.id, "typing")
     except Exception: pass
-    _reply(m, format_funding_message(coin))
+    write_log(f"CMD /funding | uid={uid} | coin={coin}")
+    msg = format_funding_message(coin)
+    write_log(f"CMD /funding OK | uid={uid}")
+    _reply(m, msg)
 
 
 @bot.message_handler(commands=["tvl", "defi"])
 def cmd_tvl(m):
     """🏦 DeFi TVL по сетям (DeFiLlama)."""
+    uid = m.from_user.id
     try: bot.send_chat_action(m.chat.id, "typing")
     except Exception: pass
-    _reply(m, format_tvl_message())
+    write_log(f"CMD /tvl | uid={uid}")
+    msg = format_tvl_message()
+    write_log(f"CMD /tvl OK | uid={uid}")
+    _reply(m, msg)
 
 
 @bot.message_handler(commands=["portfolio", "port", "портфель"])
@@ -3066,7 +3095,7 @@ def api_prices_top50():
             if t["symbol"].endswith("USDT")
             and float(t.get("lastPrice", 0)) > 0
             and float(t.get("quoteVolume", 0)) > 1_000_000
-            and not any(t["symbol"].replace("USDT","") in _SKIP_COINS)
+            and t["symbol"].replace("USDT","") not in _SKIP_COINS
             and not any(sfx in t["symbol"] for sfx in _SKIP_SUFFIXES)
         ]
         tickers.sort(key=lambda t: float(t.get("quoteVolume", 0)), reverse=True)

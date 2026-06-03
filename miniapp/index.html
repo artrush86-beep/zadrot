@@ -215,28 +215,34 @@
 <!-- 📊 PRICES -->
 <div class="page active" id="page-prices">
   <div class="card">
-    <div class="card-title">📊 Крипто-цены</div>
+    <div class="card-title" style="display:flex;justify-content:space-between;align-items:center">
+      <span>📊 Крипто-цены</span>
+      <span id="prices-upd" style="font-size:11px;color:var(--muted)"></span>
+    </div>
+    <!-- Переключатель Топ-5 / Топ-50 -->
+    <div class="period-tabs" style="margin-bottom:10px">
+      <button class="ptab active" id="tab-top5"  onclick="switchPriceView('top5',this)">⭐ Топ-5</button>
+      <button class="ptab"        id="tab-top50" onclick="switchPriceView('top50',this)">🏆 Топ-50</button>
+    </div>
+    <!-- Топ-5 блок -->
     <div id="prices-list"><div class="loader"><span class="spinner">⏳</span>Загружаем цены...</div></div>
+    <!-- Топ-50 блок (скрыт по умолчанию) -->
+    <div id="top50-block" style="display:none">
+      <div class="search-bar">
+        <input class="search-inp" id="top50-search" placeholder="🔍 Поиск монеты..." oninput="filterTop50()">
+      </div>
+      <div class="period-tabs" id="top50-sort-tabs">
+        <button class="ptab active" onclick="sortTop50('vol',this)">📊 Объём</button>
+        <button class="ptab" onclick="sortTop50('chg_desc',this)">🟢 Рост</button>
+        <button class="ptab" onclick="sortTop50('chg_asc',this)">🔴 Падение</button>
+        <button class="ptab" onclick="sortTop50('price',this)">💰 Цена</button>
+      </div>
+      <div id="top50-list"><div class="loader"><span class="spinner">⏳</span>Загружаем топ-50...</div></div>
+    </div>
   </div>
   <div class="card">
     <div class="card-title">😱 Fear & Greed Index</div>
     <div id="fg-block"><div class="loader"><span class="spinner">⏳</span></div></div>
-  </div>
-  <div class="card">
-    <div class="card-title" style="display:flex;justify-content:space-between;align-items:center">
-      <span>🏆 Топ-50 по объёму</span>
-      <span id="top50-upd" style="font-size:11px;color:var(--muted)"></span>
-    </div>
-    <div class="search-bar">
-      <input class="search-inp" id="top50-search" placeholder="🔍 Поиск монеты..." oninput="filterTop50()">
-    </div>
-    <div class="period-tabs" id="top50-sort-tabs">
-      <button class="ptab active" onclick="sortTop50('vol',this)">📊 Объём</button>
-      <button class="ptab" onclick="sortTop50('chg_desc',this)">🟢 Рост</button>
-      <button class="ptab" onclick="sortTop50('chg_asc',this)">🔴 Падение</button>
-      <button class="ptab" onclick="sortTop50('price',this)">💰 Цена</button>
-    </div>
-    <div id="top50-list"><div class="loader"><span class="spinner">⏳</span>Загружаем топ-50...</div></div>
   </div>
 </div>
 
@@ -847,6 +853,23 @@ async function loadNews() {
   const activeTab = document.querySelector('#news-period-tabs .ptab.active');
   if (activeTab) filterNews('all', activeTab);
   else _renderNews(news);
+}
+
+// ── PRICE VIEW SWITCHER (Топ-5 / Топ-50) ────────────────────────────────────
+function switchPriceView(mode, btn) {
+  document.querySelectorAll('#page-prices .period-tabs:first-of-type .ptab').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  const top5Block  = document.getElementById('prices-list');
+  const top50Block = document.getElementById('top50-block');
+  const fgBlock    = document.getElementById('fg-block').closest('.card');
+  if (mode === 'top50') {
+    top5Block.style.display  = 'none';
+    top50Block.style.display = 'block';
+    if (!_top50Data.length) loadTop50();
+  } else {
+    top5Block.style.display  = '';
+    top50Block.style.display = 'none';
+  }
 }
 
 // ── TOP-50 (с сортировкой и поиском) ──────────────────────────────────────────

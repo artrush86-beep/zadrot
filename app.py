@@ -2106,12 +2106,8 @@ def handle_ai_prefix(m):
 # ══════════════════════════════════════════════════════════════════════════════
 # ГЛАВНЫЙ ОБРАБОТЧИК СООБЩЕНИЙ
 # ══════════════════════════════════════════════════════════════════════════════
-@bot.message_handler(func=lambda m: True, content_types=["text"])
+@bot.message_handler(func=lambda m: m.text and not m.text.startswith("/"), content_types=["text"])
 def handle_message(message):
-    # Пропускаем команды — они обрабатываются своими хендлерами ниже
-    if message.text and message.text.startswith("/"):
-        return
-
     # Игнорируем старые сообщения
     if time.time() - message.date > 60:
         return

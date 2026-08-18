@@ -59,7 +59,6 @@ from game_module import (
     get_vote_results, format_vote_results,
 )
 from apscheduler.schedulers.background import BackgroundScheduler
-from ai_providers import MultiProviderAI
 
 app = Flask(__name__)
 
@@ -351,20 +350,15 @@ gemini = GeminiAI(GEMINI_API_KEY)
 
 def ask_ai(user_message: str, user_name: str = "", context: str = "",
            history: list = None, user_id: int = None) -> str | None:
-    """Единая точка вызова AI: перебор провайдеров по порядку fallback."""
-    resp = multi_ai.ask(user_message, user_name=user_name, context=context, history=history)
-    if resp and user_id:
-        try:
-            if not _redis_save_hist(user_id, user_message, resp):
-                save_chat_message(user_id, user_message, resp)
-        except Exception:
-            pass
-    return resp
-
-
-def ai_available() -> bool:
-    """Есть ли хотя бы один настроенный AI-провайдер."""
-    return multi_ai.available
+    """Единая точка вызова AI: сначала Groq, fallback на Gemini."""
+    # Groq (основной — быстрее)
+    resp = ai.ask(user_message, user_name, context=context, history=history, user_id=user_id)
+    if resp:
+        return resp
+    # Gemini (резерв — если Groq не ответил или ключ не задан)
+    if gemini.enabled:
+        return gemini.ask(user_message, user_name)
+    return None
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ЛОГИРОВАНИЕ
@@ -389,11 +383,6 @@ def write_log(entry: str):
         pass
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ══════════════════════════════════════════════════════════════════════════════
-# MULTI-PROVIDER AI (Groq → Gemini → OpenRouter → Cerebras → Mistral → GitHub → Cloudflare)
-# ══════════════════════════════════════════════════════════════════════════════
-multi_ai = MultiProviderAI(log_fn=write_log)
-
 # БАЗА ДАННЫХ SQLite
 # ══════════════════════════════════════════════════════════════════════════════
 _db_lock = threading.Lock()
@@ -1141,7 +1130,7 @@ def get_bot_answer(text: str, name: str, use_ai: bool = True,
             return answer.format(name=name)
 
     # 🤖 Если нет шаблонного ответа — спрашиваем AI (Groq → Gemini fallback)
-    if use_ai and ai_available():
+    if use_ai and (ai.api_key or gemini.enabled):
         # История: сначала Redis, потом SQLite
         if user_id:
             history = get_chat_history_r(user_id, limit=5) or get_chat_history(user_id, limit=5)
@@ -1862,7 +1851,7 @@ def cmd_ai(m):
         _reply(m, "⏳ Слишком много вопросов! Подожди минуту (лимит 5 в минуту).")
         return
 
-    if not ai_available():
+    if not ai.api_key:
         _reply(m, "❌ AI сейчас недоступен. Попробуй позже.")
         return
 
@@ -1895,7 +1884,7 @@ def cmd_ai(m):
                       history=history, user_id=uid)
 
     if response:
-        label = f"🤖 {multi_ai.last_provider}"
+        label = "🤖 Groq" if ai.api_key else "🌟 Gemini"
         _reply(m, f"{label} <b>отвечает:</b>\n\n{response}")
     else:
         _reply(m, "❌ AI не смог ответить. Попробуй другой вопрос или повтори позже.")
@@ -2107,7 +2096,7 @@ def handle_ai_prefix(m):
             pass
         return
 
-    if not ai_available():
+    if not ai.api_key:
         try:
             _reply_to_with_retry(m, "❌ AI сейчас недоступен. Попробуй позже.", parse_mode="HTML")
         except Exception as e:
@@ -2182,7 +2171,7 @@ def handle_message(message):
         add_global_ctx(user.first_name or "User", message.text)
         _detect_topic(message.text)
     msg_count = incr_user_msg_count(user.id)
-    if msg_count % 10 == 0 and ai_available():
+    if msg_count % 10 == 0 and (ai.api_key or gemini.enabled):
         threading.Thread(target=_update_user_interests,
                          args=(user.id, user.first_name), daemon=True).start()
 
@@ -2226,7 +2215,7 @@ def handle_message(message):
         if admin: return
 
     # ── 12% шанс ответить AI на любое сообщение (для активности) ─────────────
-    if should_random_reply() and ai_available():
+    if should_random_reply() and (ai.api_key or gemini.enabled):
         uid_r = user.id
         history = get_chat_history_r(uid_r, limit=5) or get_chat_history(uid_r, limit=5)
         global_ctx = get_global_ctx(limit=15)
@@ -2440,14 +2429,18 @@ def cmd_redis_stat(m):
     if not is_admin(m.chat.id, m.from_user.id):
         _reply(m, "❌ Только для администраторов."); return
     stats = redis_stats()
+    gemini_status = "✅ Подключён" if gemini.enabled else "❌ Ключ не задан"
+    groq_status = "✅ Подключён" if ai.api_key else "❌ Ключ не задан"
     lines = [
         "🔴 <b>Redis статус</b>",
         f"Статус: {stats.get('status', '?')}",
         f"Ключей: {stats.get('keys', '?')}",
         f"Память: {stats.get('memory', '?')}",
         "",
-        "🤖 <b>AI провайдеры</b>",
-    ] + multi_ai.status_lines()
+        "🤖 <b>AI статус</b>",
+        f"Groq: {groq_status}",
+        f"Gemini: {gemini_status}",
+    ]
     _reply(m, "\n".join(lines))
 
 
@@ -2728,7 +2721,7 @@ def cmd_achievements(m):
 @bot.message_handler(commands=["summary", "итог"])
 def cmd_summary(m):
     """📝 AI-суммаризация последних сообщений чата."""
-    if not ai_available():
+    if not (ai.api_key or gemini.enabled):
         _reply(m, "❌ AI не настроен."); return
     ctx = get_global_ctx(limit=30)
     if not ctx:
@@ -3292,14 +3285,14 @@ def _job_morning():
     """Утренний пост — 08:00 МСК."""
     write_log("SCHEDULER | morning job triggered")
     text = random.choice(MORNING_MESSAGES)
-    if ai_available():
-        ai_greeting = multi_ai.generate_greeting("чат", is_morning=True)
+    if ai.api_key:
+        ai_greeting = ai.generate_greeting("чат", is_morning=True)
         if ai_greeting:
             text = ai_greeting
     _send_scheduled_message(text, MORNING_PHOTO_PATH)
     # AI-брифинг по рынку
     try:
-        if ai_available():
+        if ai.api_key or gemini.enabled:
             crypto_ctx = get_crypto_ai_context()
             briefing = ask_ai(
                 "Напиши краткий утренний крипто-брифинг для чата (3 предложения). "
@@ -3548,7 +3541,7 @@ def _job_daily_vote():
 def _job_daytime_engage():
     """Дневной вопрос от AI — 15:00 МСК. Только если AI активен и чат не бурлит."""
     write_log("SCHEDULER | daytime_engage triggered")
-    if not ai_available() or not CHAT_ID:
+    if not (ai.api_key or gemini.enabled) or not CHAT_ID:
         return
     try:
         # Если в последних 15 сообщениях чата много активности — не мешаем
@@ -3675,8 +3668,8 @@ def morning_post():
     """Ручной триггер утреннего поста (APScheduler запускает автоматически в 08:00 МСК)."""
     text = random.choice(MORNING_MESSAGES)
     # Если есть AI — генерируем уникальное приветствие
-    if ai_available():
-        ai_greeting = multi_ai.generate_greeting("чат", is_morning=True)
+    if ai.api_key:
+        ai_greeting = ai.generate_greeting("чат", is_morning=True)
         if ai_greeting:
             text = ai_greeting
     return _send_scheduled_message(text, MORNING_PHOTO_PATH)

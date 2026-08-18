@@ -68,50 +68,59 @@ else:
     warn("Пропуск: BOT_TOKEN не задан")
 
 # ══════════════════════════════════════════════════════════════════════════════
-hdr("3. GROQ AI")
-if GROQ_KEY:
-    try:
-        r = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"},
-            json={"model":"llama-3.3-70b-versatile","messages":[{"role":"user","content":"ping"}],"max_tokens":5},
-            timeout=15
-        )
-        if r.status_code == 200:
-            ok(f"Groq API работает (llama-3.3-70b)")
-            passed += 1
-        elif r.status_code == 401:
-            err(f"Groq: неверный API ключ → console.groq.com"); failed += 1
-        elif r.status_code == 429:
-            warn(f"Groq: лимит запросов (попробуй позже)")
-        else:
-            err(f"Groq: статус {r.status_code} — {r.text[:100]}"); failed += 1
-    except Exception as e:
-        err(f"Groq недоступен: {e}"); failed += 1
-else:
-    warn("Пропуск: GROQ_API_KEY не задан")
+hdr("3. AI ПРОВАЙДЕРЫ (OpenAI-compatible)")
 
-# ══════════════════════════════════════════════════════════════════════════════
-hdr("4. GEMINI AI")
-if GEMINI_KEY:
+AI_PROVIDERS = [
+    ("Groq",        "https://api.groq.com/openai/v1", os.environ.get("GROQ_API_KEY",""), os.environ.get("GROQ_MODEL","llama-3.3-70b-versatile")),
+    ("Gemini",      "https://generativelanguage.googleapis.com/v1beta/openai", os.environ.get("GEMINI_API_KEY",""), os.environ.get("GEMINI_MODEL","gemini-2.5-flash")),
+    ("OpenRouter",  "https://openrouter.ai/api/v1", os.environ.get("OPENROUTER_API_KEY",""), os.environ.get("OPENROUTER_MODEL","meta-llama/llama-3.3-70b-instruct:free")),
+    ("Cerebras",    "https://api.cerebras.ai/v1", os.environ.get("CEREBRAS_API_KEY",""), os.environ.get("CEREBRAS_MODEL","llama-3.3-70b")),
+    ("Mistral",     "https://api.mistral.ai/v1", os.environ.get("MISTRAL_API_KEY",""), os.environ.get("MISTRAL_MODEL","mistral-small-latest")),
+    ("GitHub Models","https://models.inference.ai.azure.com", os.environ.get("GITHUB_TOKEN",""), os.environ.get("GITHUB_MODEL","gpt-4o-mini")),
+]
+
+def _test_provider(name, base_url, key, model, extra_headers=None):
+    global passed, failed
+    if not key:
+        warn(f"{name}: ключ не задан (пропуск)")
+        return
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    if extra_headers:
+        headers.update(extra_headers)
     try:
         r = requests.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}",
-            json={"contents":[{"parts":[{"text":"ping"}]}],"generationConfig":{"maxOutputTokens":5}},
-            timeout=15
+            f"{base_url.rstrip('/')}/chat/completions",
+            headers=headers,
+            json={"model": model, "messages":[{"role":"user","content":"ping"}], "max_tokens":5},
+            timeout=20
         )
         if r.status_code == 200:
-            ok("Gemini 2.0 Flash работает"); passed += 1
-        elif r.status_code == 400:
-            err(f"Gemini: ошибка запроса — {r.text[:100]}"); failed += 1
-        elif r.status_code == 403:
-            err(f"Gemini: неверный ключ → aistudio.google.com"); failed += 1
+            ok(f"{name} работает ({model})"); passed += 1
+        elif r.status_code in (401, 403):
+            err(f"{name}: неверный ключ (HTTP {r.status_code})"); failed += 1
+        elif r.status_code == 429:
+            warn(f"{name}: лимит запросов")
+        elif r.status_code == 404:
+            err(f"{name}: модель не найдена ({model}) → поменяй {name.upper().replace(' ','_')}_MODEL"); failed += 1
         else:
-            warn(f"Gemini: статус {r.status_code}")
+            err(f"{name}: HTTP {r.status_code} — {r.text[:120]}"); failed += 1
     except Exception as e:
-        warn(f"Gemini недоступен: {e}")
+        err(f"{name} недоступен: {e}"); failed += 1
+
+for name, base, key, model in AI_PROVIDERS:
+    extra = {"HTTP-Referer":"https://t.me", "X-Title":"StathamBot"} if name == "OpenRouter" else None
+    _test_provider(name, base, key, model, extra)
+
+# Cloudflare — отдельно (нужен account_id)
+CF_KEY   = os.environ.get("CLOUDFLARE_API_TOKEN","")
+CF_ACC   = os.environ.get("CLOUDFLARE_ACCOUNT_ID","")
+CF_MODEL = os.environ.get("CLOUDFLARE_MODEL","@cf/meta/llama-3.1-8b-instruct")
+if CF_KEY and CF_ACC:
+    _test_provider("Cloudflare", f"https://api.cloudflare.com/client/v4/accounts/{CF_ACC}/ai/v1", CF_KEY, CF_MODEL)
+elif not CF_KEY:
+    warn("Cloudflare: CLOUDFLARE_API_TOKEN не задан (пропуск)")
 else:
-    warn("Пропуск: GEMINI_API_KEY не задан (опционально)")
+    warn("Cloudflare: CLOUDFLARE_ACCOUNT_ID не задан (пропуск)")
 
 # ══════════════════════════════════════════════════════════════════════════════
 hdr("5. REDIS")

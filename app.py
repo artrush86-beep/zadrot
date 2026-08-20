@@ -3332,12 +3332,6 @@ def _job_night():
     text = random.choice(NIGHT_MESSAGES)
     _send_scheduled_message(text, NIGHT_PHOTO_PATH)
 
-def _job_factofday():
-    """Факт дня — 12:00 МСК."""
-    write_log("SCHEDULER | factofday job triggered")
-    text = random.choice(DAILY_FACTS)
-    _send_scheduled_message(text)
-
 def _build_daily_report() -> str:
     """Собирает текст ежедневного отчёта."""
     stats = get_daily_stats()
@@ -3523,55 +3517,6 @@ def _job_calendar_check():
         write_log(f"CALENDAR_ERR | {e}")
 
 
-def _job_daily_vote():
-    """Ежедневное голосование в чате в 10:00 МСК."""
-    write_log("SCHEDULER | daily_vote")
-    if not CHAT_ID:
-        write_log("DAILY_VOTE_ERR | CHAT_ID не задан")
-        return
-    try:
-        import datetime
-        question = get_daily_question()
-        qid = datetime.date.today().isoformat()
-        markup = telebot.types.InlineKeyboardMarkup(row_width=2)
-        btns = [telebot.types.InlineKeyboardButton(
-            text=f"{i+1}. {opt}",
-            callback_data=f"vote:{qid}:{i}"
-        ) for i, opt in enumerate(question["options"])]
-        markup.add(*btns)
-        text = f"📊 <b>Вопрос дня</b>\n\n{question['text']}"
-        bot.send_message(int(CHAT_ID), text, parse_mode="HTML", reply_markup=markup)
-        write_log(f"CRON_OK | daily_vote sent to {CHAT_ID}")
-    except Exception as e:
-        write_log(f"DAILY_VOTE_ERR | {e}")
-
-def _job_daytime_engage():
-    """Дневной вопрос от AI — 15:00 МСК. Только если AI активен и чат не бурлит."""
-    write_log("SCHEDULER | daytime_engage triggered")
-    if not ai_available() or not CHAT_ID:
-        return
-    try:
-        # Если в последних 15 сообщениях чата много активности — не мешаем
-        global_ctx = get_global_ctx(limit=15)
-        if global_ctx and global_ctx.count("\n") >= 12:
-            write_log("SCHEDULER | daytime_engage skipped — chat is active")
-            return
-        crypto_ctx = get_crypto_ai_context()
-        prompt = (
-            "Придумай ОДИН короткий вопрос или тему для обсуждения в крипто-чате. "
-            "Опирайся на текущий рынок. Формат: 1-2 предложения + смайлы. "
-            "Заверши вопросом чтобы участники ответили. "
-            f"Контекст: {crypto_ctx}"
-        )
-        question = ask_ai(prompt, "", context=crypto_ctx)
-        if question:
-            markup = _miniapp_markup()
-            _send_scheduled_message(f"💬 <b>Тема дня</b>\n\n{question}", reply_markup=markup)
-            write_log("SCHEDULER | daytime_engage sent")
-    except Exception as e:
-        write_log(f"DAYTIME_ENGAGE_ERR | {e}")
-
-
 def _job_evening_movers():
     """Вечерняя сводка — рынок + топ движения + DeFi TVL — 22:00 МСК."""
     write_log("SCHEDULER | evening_movers job triggered")
@@ -3591,7 +3536,6 @@ def _job_evening_movers():
 
 _scheduler = BackgroundScheduler(timezone="Europe/Moscow", daemon=True)
 _scheduler.add_job(_job_morning,        "cron", hour=8,  minute=0,  id="morning")
-_scheduler.add_job(_job_factofday,      "cron", hour=12, minute=0,  id="factofday")
 _scheduler.add_job(_job_night,          "cron", hour=23, minute=0,  id="night")
 _scheduler.add_job(_job_daily_report,   "cron", hour=23, minute=50, id="daily_report")
 _scheduler.add_job(_job_weekly_top,     "cron", day_of_week="sun", hour=20, minute=0, id="weekly_top")
@@ -3600,13 +3544,11 @@ _scheduler.add_job(_job_market_summary, "cron", hour="7,9,13,17,21", minute=0, i
 _scheduler.add_job(_job_check_alerts,   "interval", minutes=5, id="price_alerts", max_instances=1)
 _scheduler.add_job(_job_resolve_predictions, "interval", hours=4, id="resolve_preds", max_instances=1)
 _scheduler.add_job(_job_calendar_check, "cron", hour="8,20", minute=0, id="calendar")
-_scheduler.add_job(_job_daily_vote,     "cron", hour=10, minute=0, id="daily_vote")
-_scheduler.add_job(_job_evening_movers, "cron", hour=22, minute=0, id="evening_movers")
-_scheduler.add_job(_job_daytime_engage, "cron", hour=15, minute=0, id="daytime_engage")
+_scheduler.add_job(_job_evening_movers, "cron", hour=22, minute=0,  id="evening_movers")
 _scheduler.start()
-write_log("SCHEDULER | APScheduler started (morning=08:00, fact=12:00, night=23:00, "
-          "report=23:50, weekly_top=Sun 20:00, vote=10:00, market=07,09,13,17,21, alerts=5min, "
-          "movers+market=22:00, engage=15:00, calendar=08,20 MSK)")
+write_log("SCHEDULER | APScheduler started (morning=08:00, night=23:00, "
+          "report=23:50, weekly_top=Sun 20:00, market=07,09,13,17,21, alerts=5min, "
+          "movers=22:00, calendar=08,20 MSK)")
 
 # Graceful shutdown при SIGTERM (Railway останавливает контейнер через SIGTERM)
 def _handle_shutdown(sig, frame):

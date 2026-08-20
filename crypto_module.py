@@ -133,6 +133,12 @@ COIN_ALIASES = {
     "rose":"oasis-network","oasis":"oasis-network",
 }
 
+# Отображаемый символ, если провайдер переименовал монету
+# (CoinGecko: the-open-network теперь возвращает symbol "GRAM")
+DISPLAY_SYMBOL_OVERRIDES = {
+    "the-open-network": "TON",
+}
+
 
 # ══ ЦЕНЫ ═══════════════════════════════════════════════════════════════════════
 # Binance символы (CoinGecko ID → Binance trading pair)
@@ -296,7 +302,8 @@ def get_prices(coins: list) -> dict:
         r.raise_for_status()
         for coin in r.json():
             result[coin["id"]] = {
-                "symbol": coin["symbol"].upper(), "name": coin["name"],
+                "symbol": DISPLAY_SYMBOL_OVERRIDES.get(coin["id"], coin["symbol"].upper()),
+                "name": coin["name"],
                 "price": coin["current_price"],
                 "change_1h":  coin.get("price_change_percentage_1h_in_currency"),
                 "change_24h": coin.get("price_change_percentage_24h"),

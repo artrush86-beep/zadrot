@@ -8,6 +8,7 @@ __pycache__/
 !hello.jpg
 !goodb.jpg
 bot_config.json
+*.bak
 users.json
 warns.json
 fg_state.json

@@ -2654,71 +2654,6 @@ def cmd_predtop(m):
     _reply(m, "\n".join(lines))
 
 
-@bot.message_handler(commands=["dailyvote", "голос", "vote"])
-def cmd_dailyvote(m):
-    """📊 Ежедневное голосование с кнопками."""
-    import datetime
-    question = get_daily_question()
-    qid = datetime.date.today().isoformat()
-    options_text = "\n".join([f"{i+1}. {o}" for i, o in enumerate(question["options"])])
-    results = get_vote_results(qid, question["options"])
-    total = results.get("total", 0) if results else 0
-
-    # Создаём клавиатуру
-    markup = telebot.types.InlineKeyboardMarkup(row_width=2)
-    btns = [telebot.types.InlineKeyboardButton(
-        text=f"{i+1}. {opt}",
-        callback_data=f"vote:{qid}:{i}"
-    ) for i, opt in enumerate(question["options"])]
-    markup.add(*btns)
-
-    text = (
-        f"📊 <b>Вопрос дня</b>\n\n"
-        f"{question['text']}\n\n"
-        f"👥 Уже проголосовало: <b>{total}</b>"
-    )
-    try:
-        bot.send_message(m.chat.id, text, parse_mode="HTML",
-                        reply_markup=markup)
-    except Exception as e:
-        _reply(m, text + "\n\n" + options_text)
-
-
-@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("vote:"))
-def handle_vote_callback(call):
-    """Обработка голосования через inline кнопки."""
-    import datetime
-    parts = call.data.split(":")
-    if len(parts) != 3:
-        return
-    qid = parts[1]; option_idx = int(parts[2])
-    question = get_daily_question()
-    current_qid = datetime.date.today().isoformat()
-    if qid != current_qid:
-        bot.answer_callback_query(call.id, "⏰ Это голосование уже устарело.")
-        return
-    ok, msg = vote(call.from_user.id, qid, option_idx)
-    if not ok:
-        bot.answer_callback_query(call.id, msg)
-        return
-    add_xp(call.from_user.id, 3)
-    bot.answer_callback_query(call.id, "✅ Голос принят! +3 XP")
-    # Обновляем сообщение с результатами
-    try:
-        results_text = format_vote_results(qid, question["text"], question["options"])
-        markup = telebot.types.InlineKeyboardMarkup(row_width=2)
-        btns = [telebot.types.InlineKeyboardButton(
-            text=f"{i+1}. {opt}",
-            callback_data=f"vote:{qid}:{i}"
-        ) for i, opt in enumerate(question["options"])]
-        markup.add(*btns)
-        bot.edit_message_text(results_text, call.message.chat.id,
-                             call.message.message_id,
-                             parse_mode="HTML", reply_markup=markup)
-    except Exception:
-        pass
-
-
 @bot.message_handler(commands=["achievements", "ачивки", "бейджи"])
 def cmd_achievements(m):
     """🏅 Мои достижения."""
@@ -3577,15 +3512,7 @@ NIGHT_MESSAGES = [
     "💫 Ночь — время мечтать! Спокойной ночи всем! ✨",
 ]
 
-DAILY_FACTS = [
-    "🎯 Факт дня: Самое быстрое животное — сапсан, он разгоняется до 390 км/ч!",
-    "🎯 Факт дня: Медузы состоят на 95% из воды и не имеют мозга!",
-    "🎯 Факт дня: Осьминоги могут менять цвет за 0,3 секунды!",
-    "🎯 Факт дня: У жирафов столько же шейных позвонков, сколько у человека — 7!",
-    "🎯 Факт дня: Банан — ягода, а клубника — нет! 🍌",
-    "🎯 Факт дня: Пчёлы могут различать лица людей! 🐝",
-    "🎯 Факт дня: Слоны — единственные животные, которые не умеют прыгать! 🐘",
-]
+DAILY_FACTS_REMOVED = None  # факт дня удалён по требованию
 
 def _send_scheduled_message(text: str, photo_path: str = None, reply_markup=None):
     """Отправляет сообщение в чат (используется cron)."""

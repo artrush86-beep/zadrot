@@ -55,8 +55,7 @@ from game_module import (
     give_achievement, get_achievements, format_achievements,
     make_prediction, get_active_predictions, resolve_predictions,
     save_predict_stats, get_predict_stats, format_predict_stats,
-    get_prediction_leaderboard, get_daily_question, vote,
-    get_vote_results, format_vote_results,
+    get_prediction_leaderboard,
 )
 from apscheduler.schedulers.background import BackgroundScheduler
 from ai_providers import MultiProviderAI

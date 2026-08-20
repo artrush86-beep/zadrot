@@ -5,6 +5,8 @@ __pycache__/
 *.log
 *.png
 *.jpg
+!hello.jpg
+!goodb.jpg
 bot_config.json
 users.json
 warns.json

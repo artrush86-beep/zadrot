@@ -1,0 +1,2 @@
+[2026-08-20 19:06:05 UTC] SCHEDULER | APScheduler started (morning=08:00, fact=12:00, night=23:00, report=23:50, weekly_top=Sun 20:00, vote=10:00, market=07,09,13,17,21, alerts=5min, movers+market=22:00, engage=15:00, calendar=08,20 MSK)
+[2026-08-20 19:08:07 UTC] SCHEDULER | APScheduler started (morning=08:00, fact=12:00, night=23:00, report=23:50, weekly_top=Sun 20:00, vote=10:00, market=07,09,13,17,21, alerts=5min, movers+market=22:00, engage=15:00, calendar=08,20 MSK)

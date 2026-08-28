@@ -3501,14 +3501,12 @@ def _job_evening_movers():
 
 
 # ══ ТОРГОВЫЕ СЕССИИ (открытие/закрытие) ═════════════════════════════════════
-# Времена — МСК (UTC+3). Летом Лондон/Нью-Йорк сдвигаются на +1 час.
-_TRADING_SESSIONS = [
-    (3,  0,  "🌏 <b>Азиатская сессия открылась</b>\nТокио · Гонконг · Сингапур. Начинается торговый день."),
-    (10, 0,  "🇪🇺 <b>Европейская сессия открылась</b>\nЛондон и Франкфурт в игре — волатильность растёт."),
-    (12, 0,  "🌏 <b>Азиатская сессия закрылась</b>\nИнициатива переходит к европейским трейдерам."),
-    (15, 0,  "🇺🇸 <b>Американская сессия открылась</b>\nНью-Йорк — пик ликвидности и объёмов."),
-    (19, 0,  "🇪🇺 <b>Европейская сессия закрылась</b>\nРынок держат американские участники."),
-    (0,  0,  "🇺🇸 <b>Американская сессия закрылась</b>\nТорговый день завершён. До новой азиатской сессии."),
+# Времена — МСК (UTC+3). Синхронизировано с statham-bot-main (реальная реализация).
+SESSIONS = [
+    {"name": "🇦🇺 Австралия",    "open": "02:00", "close": "09:00"},
+    {"name": "🇯🇵 Азия (Токио)", "open": "03:00", "close": "09:00"},
+    {"name": "🇬🇧 Европа",       "open": "10:00", "close": "18:30"},
+    {"name": "🇺🇸 Америка",      "open": "16:30", "close": "23:00"},
 ]
 
 
@@ -3530,13 +3528,20 @@ _scheduler.add_job(_job_check_alerts,   "interval", minutes=5, id="price_alerts"
 _scheduler.add_job(_job_resolve_predictions, "interval", hours=4, id="resolve_preds", max_instances=1)
 _scheduler.add_job(_job_calendar_check, "cron", hour="8,20", minute=0, id="calendar")
 _scheduler.add_job(_job_evening_movers, "cron", hour=22, minute=0,  id="evening_movers")
-# 🆕 Торговые сессии (открытие/закрытие)
-for _hh, _mm, _txt in _TRADING_SESSIONS:
-    _scheduler.add_job(_make_session_job(_txt), "cron", hour=_hh, minute=_mm, id=f"session_{_hh:02d}_{_mm:02d}")
+# 🆕 Торговые сессии (открытие/закрытие) — только будни (пн–пт), как в statham-bot-main
+_sessions_jobs = []
+for s in SESSIONS:
+    oh, om = map(int, s["open"].split(":"))
+    ch, cm = map(int, s["close"].split(":"))
+    _sessions_jobs.append((oh, om, f"🟢 {s['name']} открылась! ({s['open']} МСК)"))
+    _sessions_jobs.append((ch, cm, f"🔴 {s['name']} закрылась! ({s['close']} МСК)"))
+for _i, (_hh, _mm, _txt) in enumerate(_sessions_jobs):
+    _scheduler.add_job(_make_session_job(_txt), "cron", day_of_week="mon-fri",
+                       hour=_hh, minute=_mm, id=f"session_{_i}")
 _scheduler.start()
 write_log("SCHEDULER | APScheduler started (morning=08:00, night=23:00, "
           "report=23:50, weekly_top=Sun 20:00, market=07,09,13,17,21, alerts=5min, "
-          "movers=22:00, calendar=08,20, sessions=03,10,12,15,19,00 MSK)")
+          "movers=22:00, calendar=08,20, sessions=пн-пт 02/03/09/10/16:30/18:30/23 MSK)")
 
 # Graceful shutdown при SIGTERM (Railway останавливает контейнер через SIGTERM)
 def _handle_shutdown(sig, frame):

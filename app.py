@@ -56,6 +56,7 @@ from game_module import (
     make_prediction, get_active_predictions, resolve_predictions,
     save_predict_stats, get_predict_stats, format_predict_stats,
     get_prediction_leaderboard,
+    get_daily_question, vote, format_vote_results,
 )
 from apscheduler.schedulers.background import BackgroundScheduler
 from ai_providers import MultiProviderAI
@@ -2374,6 +2375,12 @@ def cmd_market(m):
     _reply(m, msg)
 
 
+@bot.message_handler(commands=["sessions", "сессии"])
+def cmd_sessions(m):
+    """🕐 Торговые сессии (статус + расписание)."""
+    _reply(m, _sessions_status())
+
+
 @bot.message_handler(commands=["alert", "алерт"])
 def cmd_alert(m):
     """🔔 Ценовой алерт. /alert btc 100000 или /alert btc below 80000"""
@@ -2683,6 +2690,54 @@ def cmd_predtop(m):
             f"({row['wins']}/{row['total']})"
         )
     _reply(m, "\n".join(lines))
+
+
+@bot.message_handler(commands=["dailyvote", "vote", "голосование"])
+def cmd_dailyvote(m):
+    """🗳 Ежедневное голосование (кнопки)."""
+    q = get_daily_question()
+    qid = (datetime.datetime.utcnow() + datetime.timedelta(hours=3)).strftime("%Y-%m-%d")
+    markup = telebot.types.InlineKeyboardMarkup()
+    for i, opt in enumerate(q["options"]):
+        markup.add(telebot.types.InlineKeyboardButton(opt, callback_data=f"vote:{qid}:{i}"))
+    markup.add(telebot.types.InlineKeyboardButton("📊 Результаты", callback_data=f"voteres:{qid}"))
+    _reply(m, f"🗳 <b>Голосование дня</b>\n\n{q['text']}\n\nВыбери вариант:", reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("vote:"))
+def cb_dailyvote(call):
+    try:
+        _, qid, opt = call.data.split(":")
+        q = get_daily_question()
+        ok, msg = vote(call.from_user.id, qid, int(opt))
+        if ok:
+            results = format_vote_results(qid, q["text"], q["options"])
+            bot.edit_message_text(
+                msg + "\n\n" + results,
+                call.message.chat.id, call.message.message_id, parse_mode="HTML"
+            )
+        else:
+            bot.answer_callback_query(call.id, msg)
+    except Exception as e:
+        write_log(f"VOTE_ERR | {e}")
+        try: bot.answer_callback_query(call.id, "Ошибка.")
+        except Exception: pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("voteres:"))
+def cb_dailyvote_results(call):
+    try:
+        qid = call.data.split(":", 1)[1]
+        q = get_daily_question()
+        results = format_vote_results(qid, q["text"], q["options"])
+        bot.edit_message_text(
+            results, call.message.chat.id, call.message.message_id, parse_mode="HTML"
+        )
+        bot.answer_callback_query(call.id)
+    except Exception as e:
+        write_log(f"VOTERES_ERR | {e}")
+        try: bot.answer_callback_query(call.id, "Ошибка.")
+        except Exception: pass
 
 
 @bot.message_handler(commands=["achievements", "ачивки", "бейджи"])
@@ -3502,6 +3557,9 @@ def _job_evening_movers():
 
 # ══ ТОРГОВЫЕ СЕССИИ (открытие/закрытие) ═════════════════════════════════════
 # Времена — МСК (UTC+3). Синхронизировано с statham-bot-main (реальная реализация).
+# TG_SESSIONS_TOPIC — ID ветки для постов о сессиях (пусто = в общий чат).
+TG_SESSIONS_TOPIC = os.environ.get("TG_SESSIONS_TOPIC", "")
+
 SESSIONS = [
     {"name": "🇦🇺 Австралия",    "open": "02:00", "close": "09:00"},
     {"name": "🇯🇵 Азия (Токио)", "open": "03:00", "close": "09:00"},
@@ -3510,10 +3568,72 @@ SESSIONS = [
 ]
 
 
+def _send_session_message(text: str):
+    """Отправляет пост о сессии в TG_SESSIONS_TOPIC (или в общий чат)."""
+    if not CHAT_ID:
+        write_log("SESSIONS_ERR | CHAT_ID не задан")
+        return
+    try:
+        chat_id = int(CHAT_ID)
+        kw = {"parse_mode": "HTML"}
+        if TG_SESSIONS_TOPIC:
+            try:
+                kw["message_thread_id"] = int(TG_SESSIONS_TOPIC)
+            except (ValueError, TypeError):
+                pass
+        _send_message_simple(chat_id, text, **kw)
+        write_log(f"CRON_OK | session sent to {chat_id} thread={TG_SESSIONS_TOPIC or 'general'}")
+    except Exception as e:
+        write_log(f"SESSIONS_SEND_ERR | {e}")
+
+
+def _sessions_status() -> str:
+    """Текущий статус торговых сессий (для /sessions)."""
+    msk = datetime.datetime.utcnow() + datetime.timedelta(hours=3)
+    cur = msk.hour * 60 + msk.minute
+    active = []
+    upcoming = []
+    lines_all = []
+    for s in SESSIONS:
+        oh, om = map(int, s["open"].split(":"))
+        ch, cm = map(int, s["close"].split(":"))
+        o_min = oh * 60 + om
+        c_min = ch * 60 + cm
+        if c_min < o_min:
+            is_open = cur >= o_min or cur < c_min
+        else:
+            is_open = o_min <= cur < c_min
+        if is_open:
+            active.append(s["name"])
+        else:
+            diff = o_min - cur
+            if diff < 0:
+                diff += 1440
+            upcoming.append((diff, s["name"], s["open"]))
+        status = "🟢 Открыта" if is_open else "🔴 Закрыта"
+        lines_all.append(f"{s['name']}  {s['open']}–{s['close']}  {status}")
+
+    text = f"🕐 <b>Время МСК: {msk.strftime('%H:%M')}</b>\n"
+    if active:
+        text += f"📊 Активные сессии: <b>{', '.join(a.split()[-1] for a in active)}</b>\n"
+    else:
+        text += "📊 Активные сессии: —\n"
+    if upcoming:
+        upcoming.sort()
+        mins_left, next_name, next_open = upcoming[0]
+        h_left, m_left = divmod(mins_left, 60)
+        dur_str = f"{h_left}ч {m_left}м" if h_left else f"{m_left}м"
+        short = next_name.split()[-1]
+        text += f"⏰ Следующее: <b>{short}</b> в {next_open} МСК (через {dur_str})\n"
+    text += "\n📅 <b>Расписание (МСК):</b>\n"
+    text += "\n".join(lines_all)
+    return text
+
+
 def _make_session_job(text: str):
     def _job():
         write_log("SCHEDULER | trading_session fired")
-        _send_scheduled_message(text)
+        _send_session_message(text)
     return _job
 
 

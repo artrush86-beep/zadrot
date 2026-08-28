@@ -126,6 +126,38 @@ bot = telebot.TeleBot(TOKEN, threaded=False)
 
 # ✅ Railway: прокси не нужен — прямой доступ к Telegram API
 
+# ── 🔇 Ветки (топики), в которых бот молчит ──────────────────────────────────
+# message_thread_id запрещённых веток через запятую.
+# Задать можно через env BLOCKED_THREAD_IDS, файл bot_config.json или дефолт ниже.
+_BLOCKED_THREAD_DEFAULT = "249002,1311271,17135,428140,8022,9505,673183,5200,6314,3"
+BLOCKED_THREAD_IDS: set[int] = set(
+    int(x.strip()) for x in (
+        os.environ.get("BLOCKED_THREAD_IDS") or
+        _config.get("BLOCKED_THREAD_IDS") or
+        _BLOCKED_THREAD_DEFAULT
+    ).split(",")
+    if x.strip().lstrip("-").isdigit()
+)
+
+
+def _is_blocked_thread(m) -> bool:
+    """True, если сообщение пришло из запрещённой ветки (топика)."""
+    tid = getattr(m, "message_thread_id", None)
+    if tid is None:
+        return False
+    try:
+        return int(tid) in BLOCKED_THREAD_IDS
+    except (TypeError, ValueError):
+        return False
+
+
+# Глушим бота в запрещённых ветках: не отвечаем, не модерируем, не пишем.
+# Регистрируем ПЕРВЫМ, чтобы перехватить сообщения раньше всех остальных обработчиков.
+@bot.message_handler(func=_is_blocked_thread, content_types=["text", "new_chat_members", "left_chat_member"])
+def _block_threads_handler(m):
+    write_log(f"BLOCKED_THREAD | thread={getattr(m, 'message_thread_id', None)}")
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # RETRY ДЕКОРАТОР ДЛЯ НЕСТАБИЛЬНОГО ПРОКСИ
 # ══════════════════════════════════════════════════════════════════════════════
@@ -3468,6 +3500,25 @@ def _job_evening_movers():
         write_log(f"EVENING_MOVERS_ERR | {e}")
 
 
+# ══ ТОРГОВЫЕ СЕССИИ (открытие/закрытие) ═════════════════════════════════════
+# Времена — МСК (UTC+3). Летом Лондон/Нью-Йорк сдвигаются на +1 час.
+_TRADING_SESSIONS = [
+    (3,  0,  "🌏 <b>Азиатская сессия открылась</b>\nТокио · Гонконг · Сингапур. Начинается торговый день."),
+    (10, 0,  "🇪🇺 <b>Европейская сессия открылась</b>\nЛондон и Франкфурт в игре — волатильность растёт."),
+    (12, 0,  "🌏 <b>Азиатская сессия закрылась</b>\nИнициатива переходит к европейским трейдерам."),
+    (15, 0,  "🇺🇸 <b>Американская сессия открылась</b>\nНью-Йорк — пик ликвидности и объёмов."),
+    (19, 0,  "🇪🇺 <b>Европейская сессия закрылась</b>\nРынок держат американские участники."),
+    (0,  0,  "🇺🇸 <b>Американская сессия закрылась</b>\nТорговый день завершён. До новой азиатской сессии."),
+]
+
+
+def _make_session_job(text: str):
+    def _job():
+        write_log("SCHEDULER | trading_session fired")
+        _send_scheduled_message(text)
+    return _job
+
+
 _scheduler = BackgroundScheduler(timezone="Europe/Moscow", daemon=True)
 _scheduler.add_job(_job_morning,        "cron", hour=8,  minute=0,  id="morning")
 _scheduler.add_job(_job_night,          "cron", hour=23, minute=0,  id="night")
@@ -3479,10 +3530,13 @@ _scheduler.add_job(_job_check_alerts,   "interval", minutes=5, id="price_alerts"
 _scheduler.add_job(_job_resolve_predictions, "interval", hours=4, id="resolve_preds", max_instances=1)
 _scheduler.add_job(_job_calendar_check, "cron", hour="8,20", minute=0, id="calendar")
 _scheduler.add_job(_job_evening_movers, "cron", hour=22, minute=0,  id="evening_movers")
+# 🆕 Торговые сессии (открытие/закрытие)
+for _hh, _mm, _txt in _TRADING_SESSIONS:
+    _scheduler.add_job(_make_session_job(_txt), "cron", hour=_hh, minute=_mm, id=f"session_{_hh:02d}_{_mm:02d}")
 _scheduler.start()
 write_log("SCHEDULER | APScheduler started (morning=08:00, night=23:00, "
           "report=23:50, weekly_top=Sun 20:00, market=07,09,13,17,21, alerts=5min, "
-          "movers=22:00, calendar=08,20 MSK)")
+          "movers=22:00, calendar=08,20, sessions=03,10,12,15,19,00 MSK)")
 
 # Graceful shutdown при SIGTERM (Railway останавливает контейнер через SIGTERM)
 def _handle_shutdown(sig, frame):

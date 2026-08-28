@@ -262,101 +262,10 @@ def _enrich_with_coingecko(result: dict, ids: list) -> dict:
     return result
 
 
-def _get_prices_coingecko(ids: list) -> dict:
-    """PRIMARY: CoinGecko (без ключа, без гео-блокировок, но rate-limited)."""
-    result = {}
-    try:
-        headers = {"Accept": "application/json"}
-        if CG_API_KEY:
-            headers["x-cg-demo-api-key"] = CG_API_KEY
-        r = requests.get(f"{COINGECKO_BASE}/coins/markets", params={
-            "vs_currency": "usd", "ids": ",".join(ids),
-            "price_change_percentage": "1h,24h,7d",
-        }, timeout=12, headers=headers)
-        if r.status_code == 429:
-            return {"_error": "rate_limit"}
-        if r.status_code != 200:
-            return {}
-        for coin in r.json():
-            result[coin["id"]] = {
-                "symbol": DISPLAY_SYMBOL_OVERRIDES.get(coin["id"], coin["symbol"].upper()),
-                "name": coin["name"],
-                "price": coin["current_price"],
-                "change_1h":  coin.get("price_change_percentage_1h_in_currency"),
-                "change_24h": coin.get("price_change_percentage_24h"),
-                "change_7d":  coin.get("price_change_percentage_7d_in_currency"),
-                "market_cap": coin.get("market_cap"),
-                "volume_24h": coin.get("total_volume"),
-                "rank":       coin.get("market_cap_rank"),
-                "_source":    "coingecko",
-            }
-        return result
-    except Exception:
-        return {}
-
-
-# CryptoCompare символы (CoinGecko ID → CryptoCompare symbol)
-_CC_SYMBOLS = {
-    "bitcoin": "BTC", "ethereum": "ETH", "solana": "SOL", "binancecoin": "BNB",
-    "ripple": "XRP", "cardano": "ADA", "dogecoin": "DOGE", "the-open-network": "TON",
-    "tron": "TRX", "shiba-inu": "SHIB", "litecoin": "LTC", "matic-network": "MATIC",
-    "avalanche-2": "AVAX", "polkadot": "DOT", "chainlink": "LINK", "near": "NEAR",
-    "arbitrum": "ARB", "optimism": "OP", "injective-protocol": "INJ", "pepe": "PEPE",
-    "worldcoin-wld": "WLD", "uniswap": "UNI", "cosmos": "ATOM", "fantom": "FTM",
-    "apecoin": "APE", "fetch-ai": "FET", "the-graph": "GRT", "lido-dao": "LDO",
-    "maker": "MKR", "aave": "AAVE", "render-token": "RNDR", "immutable-x": "IMX",
-    "dogwifcoin": "WIF", "bonk": "BONK", "floki": "FLOKI", "jito-network": "JTO",
-    "pyth-network": "PYTH", "celestia": "TIA", "sei-network": "SEI", "starknet": "STRK",
-    "mantle": "MNT", "kaspa": "KAS", "bitcoin-cash": "BCH", "filecoin": "FIL",
-    "internet-computer": "ICP", "hedera-hashgraph": "HBAR", "algorand": "ALGO",
-    "vechain": "VET", "thorchain": "RUNE", "kava": "KAVA", "zilliqa": "ZIL",
-    "oasis-network": "ROSE", "singularitynet": "AGIX", "curve-dao-token": "CRV",
-    "havven": "SNX", "blur": "BLUR", "wormhole": "W", "elrond-erd-2": "EGLD",
-    "theta-token": "THETA", "blockstack": "STX", "conflux-token": "CFX", "gala": "GALA",
-    "zksync": "ZK", "monero": "XMR",
-}
-
-
-def _get_prices_cryptocompare(ids: list) -> dict:
-    """ТЕРЦИАРНЫЙ: CryptoCompare (без ключа, без гео-блока)."""
-    result = {}
-    syms = [_CC_SYMBOLS[i] for i in ids if i in _CC_SYMBOLS]
-    if not syms:
-        return {}
-    try:
-        r = requests.get("https://min-api.cryptocompare.com/data/pricemultifull",
-                         params={"fsyms": ",".join(syms), "tsyms": "USD"}, timeout=12)
-        if r.status_code != 200:
-            return {}
-        raw = r.json().get("RAW", {})
-        rev = {v: k for k, v in _CC_SYMBOLS.items()}
-        for sym in syms:
-            item = raw.get(sym, {}).get("USD")
-            if not item:
-                continue
-            coin_id = rev.get(sym, sym.lower())
-            result[coin_id] = {
-                "symbol": sym,
-                "name": coin_id.replace("-", " ").title(),
-                "price": item.get("PRICE"),
-                "change_1h": None,
-                "change_24h": item.get("CHANGEPCT24HOUR"),
-                "change_7d": None,
-                "market_cap": None,
-                "volume_24h": item.get("TOTALVOLUME24H"),
-                "rank": None,
-                "_source": "cryptocompare",
-            }
-        return result
-    except Exception:
-        return {}
-
-
 def get_prices(coins: list) -> dict:
     """
     Получает цены монет.
-    Порядок: RAM-cache → CoinGecko (primary, без гео-блока) →
-             Binance (fallback, гео-блокирован в US/RU) → CryptoCompare (терциарный).
+    Порядок: RAM-cache → Binance (primary) → CoinGecko enrichment → CoinGecko direct fallback
     """
     ids = []
     for c in coins:
@@ -370,37 +279,45 @@ def get_prices(coins: list) -> dict:
     if cached is not None:
         return cached
 
-    # 2. CoinGecko — PRIMARY (работает из любого региона, без ключа)
-    result = _get_prices_coingecko(ids)
-    if isinstance(result, dict) and result.get("_error") == "rate_limit":
-        # CoinGecko перегружен → пробуем Binance, затем CryptoCompare
-        result = _get_prices_binance(ids)
-        if result:
-            _cache_set(cache_key, result, ttl=120)
-            return result
-        result = _get_prices_cryptocompare(ids)
-        if result:
-            _cache_set(cache_key, result, ttl=120)
-            return result
-        return {"_error": "rate_limit"}
+    # 2. Binance — PRIMARY (быстро, надёжно, без ключа)
+    result = _get_prices_binance(ids)
+
     if result:
+        # 3. CoinGecko — опциональное обогащение (rank, market_cap, 7d change)
+        _enrich_with_coingecko(result, ids)
         _cache_set(cache_key, result, ttl=120)  # кэш 2 мин
         return result
 
-    # 3. Binance — FALLBACK (быстрый, но гео-блокирован в US/RU)
-    result = _get_prices_binance(ids)
-    if result:
-        _enrich_with_coingecko(result, ids)
-        _cache_set(cache_key, result, ttl=120)
+    # 4. Если Binance недоступен (редко) — CoinGecko напрямую
+    try:
+        headers = {"Accept": "application/json"}
+        if CG_API_KEY:
+            headers["x-cg-demo-api-key"] = CG_API_KEY
+        r = requests.get(f"{COINGECKO_BASE}/coins/markets", params={
+            "vs_currency": "usd", "ids": ",".join(ids),
+            "price_change_percentage": "1h,24h,7d",
+        }, timeout=12, headers=headers)
+        if r.status_code in (401, 403, 429):
+            return {"_error": "rate_limit"}
+        r.raise_for_status()
+        for coin in r.json():
+            result[coin["id"]] = {
+                "symbol": DISPLAY_SYMBOL_OVERRIDES.get(coin["id"], coin["symbol"].upper()),
+                "name": coin["name"],
+                "price": coin["current_price"],
+                "change_1h":  coin.get("price_change_percentage_1h_in_currency"),
+                "change_24h": coin.get("price_change_percentage_24h"),
+                "change_7d":  coin.get("price_change_percentage_7d_in_currency"),
+                "market_cap": coin.get("market_cap"),
+                "volume_24h": coin.get("total_volume"),
+                "rank":       coin.get("market_cap_rank"),
+                "_source":    "coingecko",
+            }
+        if result:
+            _cache_set(cache_key, result, ttl=120)
         return result
-
-    # 4. CryptoCompare — ТЕРЦИАРНЫЙ (без ключа, без гео-блока)
-    result = _get_prices_cryptocompare(ids)
-    if result:
-        _cache_set(cache_key, result, ttl=120)
-        return result
-
-    return {"_error": "all_sources_failed"}
+    except Exception as e:
+        return {"_error": str(e)}
 
 def _fmt_price(p):
     if p is None: return "?"
@@ -417,8 +334,8 @@ def format_price_message(coins_input: list) -> str:
     data = get_prices(coins_input)
     if "_error" in data:
         if data["_error"] == "rate_limit":
-            return "⏳ Источники цен перегружены, подожди ~1 минуту."
-        return "❌ Не удалось получить цены (все источники недоступны)."
+            return "⏳ CoinGecko перегружен, подожди ~1 минуту."
+        return f"❌ Ошибка: {data['_error']}"
     if not data:
         return "❌ Монеты не найдены. Попробуй: btc eth sol bnb ton"
 

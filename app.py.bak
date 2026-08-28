@@ -55,10 +55,10 @@ from game_module import (
     give_achievement, get_achievements, format_achievements,
     make_prediction, get_active_predictions, resolve_predictions,
     save_predict_stats, get_predict_stats, format_predict_stats,
-    get_prediction_leaderboard, get_daily_question, vote,
-    get_vote_results, format_vote_results,
+    get_prediction_leaderboard,
 )
 from apscheduler.schedulers.background import BackgroundScheduler
+from ai_providers import MultiProviderAI
 
 app = Flask(__name__)
 
@@ -350,15 +350,20 @@ gemini = GeminiAI(GEMINI_API_KEY)
 
 def ask_ai(user_message: str, user_name: str = "", context: str = "",
            history: list = None, user_id: int = None) -> str | None:
-    """Единая точка вызова AI: сначала Groq, fallback на Gemini."""
-    # Groq (основной — быстрее)
-    resp = ai.ask(user_message, user_name, context=context, history=history, user_id=user_id)
-    if resp:
-        return resp
-    # Gemini (резерв — если Groq не ответил или ключ не задан)
-    if gemini.enabled:
-        return gemini.ask(user_message, user_name)
-    return None
+    """Единая точка вызова AI: перебор провайдеров по порядку fallback."""
+    resp = multi_ai.ask(user_message, user_name=user_name, context=context, history=history)
+    if resp and user_id:
+        try:
+            if not _redis_save_hist(user_id, user_message, resp):
+                save_chat_message(user_id, user_message, resp)
+        except Exception:
+            pass
+    return resp
+
+
+def ai_available() -> bool:
+    """Есть ли хотя бы один настроенный AI-провайдер."""
+    return multi_ai.available
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ЛОГИРОВАНИЕ
@@ -383,6 +388,11 @@ def write_log(entry: str):
         pass
 
 # ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# MULTI-PROVIDER AI (Groq → Gemini → OpenRouter → Cerebras → Mistral → GitHub → Cloudflare)
+# ══════════════════════════════════════════════════════════════════════════════
+multi_ai = MultiProviderAI(log_fn=write_log)
+
 # БАЗА ДАННЫХ SQLite
 # ══════════════════════════════════════════════════════════════════════════════
 _db_lock = threading.Lock()
@@ -1130,7 +1140,7 @@ def get_bot_answer(text: str, name: str, use_ai: bool = True,
             return answer.format(name=name)
 
     # 🤖 Если нет шаблонного ответа — спрашиваем AI (Groq → Gemini fallback)
-    if use_ai and (ai.api_key or gemini.enabled):
+    if use_ai and ai_available():
         # История: сначала Redis, потом SQLite
         if user_id:
             history = get_chat_history_r(user_id, limit=5) or get_chat_history(user_id, limit=5)
@@ -1851,7 +1861,7 @@ def cmd_ai(m):
         _reply(m, "⏳ Слишком много вопросов! Подожди минуту (лимит 5 в минуту).")
         return
 
-    if not ai.api_key:
+    if not ai_available():
         _reply(m, "❌ AI сейчас недоступен. Попробуй позже.")
         return
 
@@ -1884,7 +1894,7 @@ def cmd_ai(m):
                       history=history, user_id=uid)
 
     if response:
-        label = "🤖 Groq" if ai.api_key else "🌟 Gemini"
+        label = f"🤖 {multi_ai.last_provider}"
         _reply(m, f"{label} <b>отвечает:</b>\n\n{response}")
     else:
         _reply(m, "❌ AI не смог ответить. Попробуй другой вопрос или повтори позже.")
@@ -2096,7 +2106,7 @@ def handle_ai_prefix(m):
             pass
         return
 
-    if not ai.api_key:
+    if not ai_available():
         try:
             _reply_to_with_retry(m, "❌ AI сейчас недоступен. Попробуй позже.", parse_mode="HTML")
         except Exception as e:
@@ -2171,7 +2181,7 @@ def handle_message(message):
         add_global_ctx(user.first_name or "User", message.text)
         _detect_topic(message.text)
     msg_count = incr_user_msg_count(user.id)
-    if msg_count % 10 == 0 and (ai.api_key or gemini.enabled):
+    if msg_count % 10 == 0 and ai_available():
         threading.Thread(target=_update_user_interests,
                          args=(user.id, user.first_name), daemon=True).start()
 
@@ -2215,7 +2225,7 @@ def handle_message(message):
         if admin: return
 
     # ── 12% шанс ответить AI на любое сообщение (для активности) ─────────────
-    if should_random_reply() and (ai.api_key or gemini.enabled):
+    if should_random_reply() and ai_available():
         uid_r = user.id
         history = get_chat_history_r(uid_r, limit=5) or get_chat_history(uid_r, limit=5)
         global_ctx = get_global_ctx(limit=15)
@@ -2429,18 +2439,14 @@ def cmd_redis_stat(m):
     if not is_admin(m.chat.id, m.from_user.id):
         _reply(m, "❌ Только для администраторов."); return
     stats = redis_stats()
-    gemini_status = "✅ Подключён" if gemini.enabled else "❌ Ключ не задан"
-    groq_status = "✅ Подключён" if ai.api_key else "❌ Ключ не задан"
     lines = [
         "🔴 <b>Redis статус</b>",
         f"Статус: {stats.get('status', '?')}",
         f"Ключей: {stats.get('keys', '?')}",
         f"Память: {stats.get('memory', '?')}",
         "",
-        "🤖 <b>AI статус</b>",
-        f"Groq: {groq_status}",
-        f"Gemini: {gemini_status}",
-    ]
+        "🤖 <b>AI провайдеры</b>",
+    ] + multi_ai.status_lines()
     _reply(m, "\n".join(lines))
 
 
@@ -2647,71 +2653,6 @@ def cmd_predtop(m):
     _reply(m, "\n".join(lines))
 
 
-@bot.message_handler(commands=["dailyvote", "голос", "vote"])
-def cmd_dailyvote(m):
-    """📊 Ежедневное голосование с кнопками."""
-    import datetime
-    question = get_daily_question()
-    qid = datetime.date.today().isoformat()
-    options_text = "\n".join([f"{i+1}. {o}" for i, o in enumerate(question["options"])])
-    results = get_vote_results(qid, question["options"])
-    total = results.get("total", 0) if results else 0
-
-    # Создаём клавиатуру
-    markup = telebot.types.InlineKeyboardMarkup(row_width=2)
-    btns = [telebot.types.InlineKeyboardButton(
-        text=f"{i+1}. {opt}",
-        callback_data=f"vote:{qid}:{i}"
-    ) for i, opt in enumerate(question["options"])]
-    markup.add(*btns)
-
-    text = (
-        f"📊 <b>Вопрос дня</b>\n\n"
-        f"{question['text']}\n\n"
-        f"👥 Уже проголосовало: <b>{total}</b>"
-    )
-    try:
-        bot.send_message(m.chat.id, text, parse_mode="HTML",
-                        reply_markup=markup)
-    except Exception as e:
-        _reply(m, text + "\n\n" + options_text)
-
-
-@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("vote:"))
-def handle_vote_callback(call):
-    """Обработка голосования через inline кнопки."""
-    import datetime
-    parts = call.data.split(":")
-    if len(parts) != 3:
-        return
-    qid = parts[1]; option_idx = int(parts[2])
-    question = get_daily_question()
-    current_qid = datetime.date.today().isoformat()
-    if qid != current_qid:
-        bot.answer_callback_query(call.id, "⏰ Это голосование уже устарело.")
-        return
-    ok, msg = vote(call.from_user.id, qid, option_idx)
-    if not ok:
-        bot.answer_callback_query(call.id, msg)
-        return
-    add_xp(call.from_user.id, 3)
-    bot.answer_callback_query(call.id, "✅ Голос принят! +3 XP")
-    # Обновляем сообщение с результатами
-    try:
-        results_text = format_vote_results(qid, question["text"], question["options"])
-        markup = telebot.types.InlineKeyboardMarkup(row_width=2)
-        btns = [telebot.types.InlineKeyboardButton(
-            text=f"{i+1}. {opt}",
-            callback_data=f"vote:{qid}:{i}"
-        ) for i, opt in enumerate(question["options"])]
-        markup.add(*btns)
-        bot.edit_message_text(results_text, call.message.chat.id,
-                             call.message.message_id,
-                             parse_mode="HTML", reply_markup=markup)
-    except Exception:
-        pass
-
-
 @bot.message_handler(commands=["achievements", "ачивки", "бейджи"])
 def cmd_achievements(m):
     """🏅 Мои достижения."""
@@ -2721,7 +2662,7 @@ def cmd_achievements(m):
 @bot.message_handler(commands=["summary", "итог"])
 def cmd_summary(m):
     """📝 AI-суммаризация последних сообщений чата."""
-    if not (ai.api_key or gemini.enabled):
+    if not ai_available():
         _reply(m, "❌ AI не настроен."); return
     ctx = get_global_ctx(limit=30)
     if not ctx:
@@ -3285,14 +3226,14 @@ def _job_morning():
     """Утренний пост — 08:00 МСК."""
     write_log("SCHEDULER | morning job triggered")
     text = random.choice(MORNING_MESSAGES)
-    if ai.api_key:
-        ai_greeting = ai.generate_greeting("чат", is_morning=True)
+    if ai_available():
+        ai_greeting = multi_ai.generate_greeting("чат", is_morning=True)
         if ai_greeting:
             text = ai_greeting
     _send_scheduled_message(text, MORNING_PHOTO_PATH)
     # AI-брифинг по рынку
     try:
-        if ai.api_key or gemini.enabled:
+        if ai_available():
             crypto_ctx = get_crypto_ai_context()
             briefing = ask_ai(
                 "Напиши краткий утренний крипто-брифинг для чата (3 предложения). "
@@ -3324,12 +3265,6 @@ def _job_night():
     write_log("SCHEDULER | night job triggered")
     text = random.choice(NIGHT_MESSAGES)
     _send_scheduled_message(text, NIGHT_PHOTO_PATH)
-
-def _job_factofday():
-    """Факт дня — 12:00 МСК."""
-    write_log("SCHEDULER | factofday job triggered")
-    text = random.choice(DAILY_FACTS)
-    _send_scheduled_message(text)
 
 def _build_daily_report() -> str:
     """Собирает текст ежедневного отчёта."""
@@ -3516,55 +3451,6 @@ def _job_calendar_check():
         write_log(f"CALENDAR_ERR | {e}")
 
 
-def _job_daily_vote():
-    """Ежедневное голосование в чате в 10:00 МСК."""
-    write_log("SCHEDULER | daily_vote")
-    if not CHAT_ID:
-        write_log("DAILY_VOTE_ERR | CHAT_ID не задан")
-        return
-    try:
-        import datetime
-        question = get_daily_question()
-        qid = datetime.date.today().isoformat()
-        markup = telebot.types.InlineKeyboardMarkup(row_width=2)
-        btns = [telebot.types.InlineKeyboardButton(
-            text=f"{i+1}. {opt}",
-            callback_data=f"vote:{qid}:{i}"
-        ) for i, opt in enumerate(question["options"])]
-        markup.add(*btns)
-        text = f"📊 <b>Вопрос дня</b>\n\n{question['text']}"
-        bot.send_message(int(CHAT_ID), text, parse_mode="HTML", reply_markup=markup)
-        write_log(f"CRON_OK | daily_vote sent to {CHAT_ID}")
-    except Exception as e:
-        write_log(f"DAILY_VOTE_ERR | {e}")
-
-def _job_daytime_engage():
-    """Дневной вопрос от AI — 15:00 МСК. Только если AI активен и чат не бурлит."""
-    write_log("SCHEDULER | daytime_engage triggered")
-    if not (ai.api_key or gemini.enabled) or not CHAT_ID:
-        return
-    try:
-        # Если в последних 15 сообщениях чата много активности — не мешаем
-        global_ctx = get_global_ctx(limit=15)
-        if global_ctx and global_ctx.count("\n") >= 12:
-            write_log("SCHEDULER | daytime_engage skipped — chat is active")
-            return
-        crypto_ctx = get_crypto_ai_context()
-        prompt = (
-            "Придумай ОДИН короткий вопрос или тему для обсуждения в крипто-чате. "
-            "Опирайся на текущий рынок. Формат: 1-2 предложения + смайлы. "
-            "Заверши вопросом чтобы участники ответили. "
-            f"Контекст: {crypto_ctx}"
-        )
-        question = ask_ai(prompt, "", context=crypto_ctx)
-        if question:
-            markup = _miniapp_markup()
-            _send_scheduled_message(f"💬 <b>Тема дня</b>\n\n{question}", reply_markup=markup)
-            write_log("SCHEDULER | daytime_engage sent")
-    except Exception as e:
-        write_log(f"DAYTIME_ENGAGE_ERR | {e}")
-
-
 def _job_evening_movers():
     """Вечерняя сводка — рынок + топ движения + DeFi TVL — 22:00 МСК."""
     write_log("SCHEDULER | evening_movers job triggered")
@@ -3584,7 +3470,6 @@ def _job_evening_movers():
 
 _scheduler = BackgroundScheduler(timezone="Europe/Moscow", daemon=True)
 _scheduler.add_job(_job_morning,        "cron", hour=8,  minute=0,  id="morning")
-_scheduler.add_job(_job_factofday,      "cron", hour=12, minute=0,  id="factofday")
 _scheduler.add_job(_job_night,          "cron", hour=23, minute=0,  id="night")
 _scheduler.add_job(_job_daily_report,   "cron", hour=23, minute=50, id="daily_report")
 _scheduler.add_job(_job_weekly_top,     "cron", day_of_week="sun", hour=20, minute=0, id="weekly_top")
@@ -3593,13 +3478,11 @@ _scheduler.add_job(_job_market_summary, "cron", hour="7,9,13,17,21", minute=0, i
 _scheduler.add_job(_job_check_alerts,   "interval", minutes=5, id="price_alerts", max_instances=1)
 _scheduler.add_job(_job_resolve_predictions, "interval", hours=4, id="resolve_preds", max_instances=1)
 _scheduler.add_job(_job_calendar_check, "cron", hour="8,20", minute=0, id="calendar")
-_scheduler.add_job(_job_daily_vote,     "cron", hour=10, minute=0, id="daily_vote")
-_scheduler.add_job(_job_evening_movers, "cron", hour=22, minute=0, id="evening_movers")
-_scheduler.add_job(_job_daytime_engage, "cron", hour=15, minute=0, id="daytime_engage")
+_scheduler.add_job(_job_evening_movers, "cron", hour=22, minute=0,  id="evening_movers")
 _scheduler.start()
-write_log("SCHEDULER | APScheduler started (morning=08:00, fact=12:00, night=23:00, "
-          "report=23:50, weekly_top=Sun 20:00, vote=10:00, market=07,09,13,17,21, alerts=5min, "
-          "movers+market=22:00, engage=15:00, calendar=08,20 MSK)")
+write_log("SCHEDULER | APScheduler started (morning=08:00, night=23:00, "
+          "report=23:50, weekly_top=Sun 20:00, market=07,09,13,17,21, alerts=5min, "
+          "movers=22:00, calendar=08,20 MSK)")
 
 # Graceful shutdown при SIGTERM (Railway останавливает контейнер через SIGTERM)
 def _handle_shutdown(sig, frame):
@@ -3628,15 +3511,7 @@ NIGHT_MESSAGES = [
     "💫 Ночь — время мечтать! Спокойной ночи всем! ✨",
 ]
 
-DAILY_FACTS = [
-    "🎯 Факт дня: Самое быстрое животное — сапсан, он разгоняется до 390 км/ч!",
-    "🎯 Факт дня: Медузы состоят на 95% из воды и не имеют мозга!",
-    "🎯 Факт дня: Осьминоги могут менять цвет за 0,3 секунды!",
-    "🎯 Факт дня: У жирафов столько же шейных позвонков, сколько у человека — 7!",
-    "🎯 Факт дня: Банан — ягода, а клубника — нет! 🍌",
-    "🎯 Факт дня: Пчёлы могут различать лица людей! 🐝",
-    "🎯 Факт дня: Слоны — единственные животные, которые не умеют прыгать! 🐘",
-]
+DAILY_FACTS_REMOVED = None  # факт дня удалён по требованию
 
 def _send_scheduled_message(text: str, photo_path: str = None, reply_markup=None):
     """Отправляет сообщение в чат (используется cron)."""
@@ -3668,8 +3543,8 @@ def morning_post():
     """Ручной триггер утреннего поста (APScheduler запускает автоматически в 08:00 МСК)."""
     text = random.choice(MORNING_MESSAGES)
     # Если есть AI — генерируем уникальное приветствие
-    if ai.api_key:
-        ai_greeting = ai.generate_greeting("чат", is_morning=True)
+    if ai_available():
+        ai_greeting = multi_ai.generate_greeting("чат", is_morning=True)
         if ai_greeting:
             text = ai_greeting
     return _send_scheduled_message(text, MORNING_PHOTO_PATH)

@@ -60,6 +60,7 @@ from game_module import (
 )
 from apscheduler.schedulers.background import BackgroundScheduler
 from ai_providers import MultiProviderAI
+import web_search_module
 
 app = Flask(__name__)
 
@@ -425,6 +426,7 @@ def write_log(entry: str):
 # MULTI-PROVIDER AI (Groq → Gemini → OpenRouter → Cerebras → Mistral → GitHub → Cloudflare)
 # ══════════════════════════════════════════════════════════════════════════════
 multi_ai = MultiProviderAI(log_fn=write_log)
+web_search_module.set_logger(write_log)
 
 # БАЗА ДАННЫХ SQLite
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1912,11 +1914,16 @@ def cmd_ai(m):
     # Получаем историю (Redis → SQLite fallback)
     uid = m.from_user.id
     history = get_chat_history_r(uid, limit=5) or get_chat_history(uid, limit=5)
-    # Добавляем крипто-контекст если вопрос про крипту
+    # Добавляем крипто-контекст если вопрос про крипту, иначе — веб-поиск,
+    # если вопрос похож на запрос свежих фактов (новости, "кто такой" итд)
     ctx_parts = ["Прямой вопрос через /ai команду"]
-    if any(kw in question.lower() for kw in ["btc","eth","биток","крипта","bitcoin","crypto","цена","рынок"]):
+    is_crypto_q = any(kw in question.lower() for kw in ["btc","eth","биток","крипта","bitcoin","crypto","цена","рынок"])
+    if is_crypto_q:
         crypto_ctx = get_crypto_ai_context()
         if crypto_ctx: ctx_parts.append(crypto_ctx)
+    elif web_search_module.needs_web_search(question):
+        web_ctx = web_search_module.get_web_context(question)
+        if web_ctx: ctx_parts.append(web_ctx)
     global_ctx = get_global_ctx(limit=15)
     if global_ctx: ctx_parts.append(global_ctx)
     user_mem = get_user_memory_str(uid)
@@ -2159,8 +2166,21 @@ def handle_ai_prefix(m):
     uid = m.from_user.id
     history = get_chat_history_r(uid, limit=5) or get_chat_history(uid, limit=5)
     user_mem = get_user_memory_str(uid)
-    context = "Явный вызов через !ai префикс"
-    if user_mem: context += "\n" + user_mem
+    ctx_parts = ["Явный вызов через !ai префикс"]
+    # Та же логика, что в /ai: крипто-контекст для крипто-вопросов,
+    # иначе веб-поиск для вопросов, похожих на запрос свежих фактов.
+    if any(kw in question.lower() for kw in
+           ["btc", "eth", "биток", "крипта", "bitcoin", "crypto", "цена", "рынок"]):
+        crypto_ctx = get_crypto_ai_context()
+        if crypto_ctx:
+            ctx_parts.append(crypto_ctx)
+    elif web_search_module.needs_web_search(question):
+        web_ctx = web_search_module.get_web_context(question)
+        if web_ctx:
+            ctx_parts.append(web_ctx)
+    if user_mem:
+        ctx_parts.append(user_mem)
+    context = "\n".join(ctx_parts)
 
     response = ask_ai(question, m.from_user.first_name, context=context,
                       history=history, user_id=uid)

@@ -772,15 +772,28 @@ def format_breaking_news(news: list) -> str:
 
 # ══ КОНТЕКСТ ДЛЯ AI ════════════════════════════════════════════════════════════
 def get_crypto_ai_context() -> str:
-    """Строка для system-prompt: актуальные цены + F&G."""
+    """Строка для system-prompt: актуальные цены + F&G + рынок + топ-новость."""
     try:
         prices = get_prices(["btc", "eth", "sol"])
         fg = get_fear_greed()
+        overview = get_market_overview()
         parts = []
         for d in prices.values():
             if not isinstance(d, dict) or "_error" in d: continue
             parts.append(f"{d['symbol']}: ${d['price']:,.0f} ({(d.get('change_24h') or 0):+.1f}% 24ч)")
         if fg: parts.append(f"Fear&Greed: {fg.get('value')}/100 ({fg.get('label')})")
+        if overview and overview.get("btc_dom"):
+            parts.append(
+                f"Доминация BTC: {overview['btc_dom']:.1f}%, "
+                f"капа рынка: ${(overview.get('total_cap') or 0)/1e12:.2f}T "
+                f"({(overview.get('cap_change') or 0):+.1f}% 24ч)"
+            )
+        try:
+            news = get_crypto_news(limit=1)
+            if news:
+                parts.append(f"Топ-новость: {news[0]['title']} ({news[0].get('source','')})")
+        except Exception:
+            pass
         if parts: return "Актуальные данные крипторынка: " + ", ".join(parts)
     except Exception: pass
     return ""

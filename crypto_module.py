@@ -682,7 +682,7 @@ def _translate_title(title: str) -> str:
             "https://api.groq.com/openai/v1/chat/completions",
             headers={"Authorization": f"Bearer {groq_key}", "Content-Type": "application/json"},
             json={
-                "model": "llama-3.3-70b-versatile",
+                "model": "openai/gpt-oss-120b",
                 "messages": [{
                     "role": "user",
                     "content": (
@@ -726,7 +726,7 @@ def _translate_titles_batch(titles: list[str]) -> list[str]:
             "https://api.groq.com/openai/v1/chat/completions",
             headers={"Authorization": f"Bearer {groq_key}", "Content-Type": "application/json"},
             json={
-                "model": "llama-3.3-70b-versatile",
+                "model": "openai/gpt-oss-120b",
                 "messages": [{
                     "role": "user",
                     "content": (

@@ -71,12 +71,15 @@ else:
 hdr("3. AI ПРОВАЙДЕРЫ (OpenAI-compatible)")
 
 AI_PROVIDERS = [
-    ("Groq",        "https://api.groq.com/openai/v1", os.environ.get("GROQ_API_KEY",""), os.environ.get("GROQ_MODEL","llama-3.3-70b-versatile")),
-    ("Gemini",      "https://generativelanguage.googleapis.com/v1beta/openai", os.environ.get("GEMINI_API_KEY",""), os.environ.get("GEMINI_MODEL","gemini-2.5-flash")),
-    ("OpenRouter",  "https://openrouter.ai/api/v1", os.environ.get("OPENROUTER_API_KEY",""), os.environ.get("OPENROUTER_MODEL","meta-llama/llama-3.3-70b-instruct:free")),
-    ("Cerebras",    "https://api.cerebras.ai/v1", os.environ.get("CEREBRAS_API_KEY",""), os.environ.get("CEREBRAS_MODEL","llama-3.3-70b")),
+    # Модели ниже сверены на 2026-09-06 — держи их в одном состоянии
+    # с ai_providers.py, иначе диагностика будет врать.
+    ("Groq",        "https://api.groq.com/openai/v1", os.environ.get("GROQ_API_KEY",""), os.environ.get("GROQ_MODEL","openai/gpt-oss-120b")),
+    ("Cerebras",    "https://api.cerebras.ai/v1", os.environ.get("CEREBRAS_API_KEY",""), os.environ.get("CEREBRAS_MODEL","gpt-oss-120b")),
+    ("SambaNova",   "https://api.sambanova.ai/v1", os.environ.get("SAMBANOVA_API_KEY",""), os.environ.get("SAMBANOVA_MODEL","Meta-Llama-3.3-70B-Instruct")),
     ("Mistral",     "https://api.mistral.ai/v1", os.environ.get("MISTRAL_API_KEY",""), os.environ.get("MISTRAL_MODEL","mistral-small-latest")),
-    ("GitHub Models","https://models.inference.ai.azure.com", os.environ.get("GITHUB_TOKEN",""), os.environ.get("GITHUB_MODEL","gpt-4o-mini")),
+    ("OpenRouter",  "https://openrouter.ai/api/v1", os.environ.get("OPENROUTER_API_KEY",""), os.environ.get("OPENROUTER_MODEL","openrouter/free")),
+    ("Gemini",      "https://generativelanguage.googleapis.com/v1beta/openai", os.environ.get("GEMINI_API_KEY",""), os.environ.get("GEMINI_MODEL","gemini-3-flash-preview")),
+    ("GitHub Models", os.environ.get("GITHUB_BASE_URL","https://models.github.ai/inference"), os.environ.get("GITHUB_TOKEN",""), os.environ.get("GITHUB_MODEL","openai/gpt-4o-mini")),
 ]
 
 def _test_provider(name, base_url, key, model, extra_headers=None):
